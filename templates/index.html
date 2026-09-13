@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=devicew-width, intial-scale=1.0">
+        <title>Conduction -- Project Track Kanban</title>
+        <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
+        <link rel="stylesheet" href="/static/css/styles.css">
+    </head>
+    <body data-store="{ selectedProject: null, activeTab: 'plan' }">
+        <div id="app-root">
+            <header>
+                <h1>Conduction</h1>
+                <p>Manage conductor tracks in all my projects</p>
+            </header>
+            <main id="main-content">
+                <button data-on-click="@get('/api/ping')">
+                    Ping  Server via Datastart SSE 
+                </button>
+                <div id="ping-result">Waiting for ping...</div>
+            </main>
+        </div>
+
+    </body>
+</html>

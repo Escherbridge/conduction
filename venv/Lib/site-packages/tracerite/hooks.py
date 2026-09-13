@@ -1,0 +1,219 @@
+"""Install and uninstall TraceRite exception handlers."""
+
+from __future__ import annotations
+
+import contextlib
+import importlib
+import logging
+import sys
+import threading
+import types
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from . import tty as _tty
+
+Unset = object()  # Sentinel for modules that didn't have __tracebackhide__ set
+
+
+@dataclass(slots=True)
+class LoaderState:
+    """Tracks the original handlers replaced by TraceRite."""
+
+    original_excepthook: Callable[..., Any] | None = None
+    original_threading_excepthook: Callable[[threading.ExceptHookArgs], Any] | None = (
+        None
+    )
+    original_stream_handler_emit: (
+        Callable[[logging.StreamHandler[Any], logging.LogRecord], Any] | None
+    ) = None
+    suppressed: dict[types.ModuleType, Any] = field(default_factory=dict)
+
+
+_state = LoaderState()
+
+SuppressionValue = bool | Literal["until"]
+
+# Modules on which to set __tracebackhide__ when loaded.
+_SUPPRESSIONS: dict[str, SuppressionValue] = {
+    "asyncio.base_events": True,
+    "asyncio.runners": True,
+    "importlib": True,
+    "importlib._bootstrap": True,
+}
+
+
+def _tracerite_excepthook(exc_type, exc_value, exc_tb):
+    try:
+        _tty.tty_traceback(exc=exc_value)
+    except Exception:
+        if _state.original_excepthook:
+            _state.original_excepthook(exc_type, exc_value, exc_tb)
+        else:
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+def _tracerite_threading_excepthook(args):  # pragma: no cover (pytest intercepts)
+    try:
+        _tty.tty_traceback(exc=args.exc_value)
+    except Exception:
+        if _state.original_threading_excepthook:
+            _state.original_threading_excepthook(args)
+        else:
+            sys.__excepthook__(args.exc_type, args.exc_value, args.exc_traceback)
+
+
+def _tracerite_stream_handler_emit(self, record: logging.LogRecord) -> None:
+    """Emit a log record with TraceRite formatting for exceptions."""
+    try:
+        # Check if we have exception info to format specially
+        if not record.exc_info or record.exc_info[1] is None:
+            # No exception, use original emit
+            original = _state.original_stream_handler_emit
+            if original is None:
+                return
+            return original(self, record)
+
+        # Temporarily clear exc_info so format() doesn't include traceback
+        exc_info = record.exc_info
+        record.exc_info = None
+        record.exc_text = None
+        try:
+            msg = self.format(record)
+        finally:
+            record.exc_info = exc_info
+
+        # Temporarily restore original handler to avoid recursion
+        original_emit = logging.StreamHandler.emit
+        original = _state.original_stream_handler_emit
+        if original is None:
+            return self.handleError(record)
+        type.__setattr__(logging.StreamHandler, "emit", original)
+        try:
+            # Now format and write the exception using TraceRite
+            _tty.tty_traceback(exc=exc_info[1], file=self.stream, msg=msg)
+        finally:
+            logging.StreamHandler.emit = original_emit
+    except RecursionError:
+        raise
+    except Exception:
+        self.handleError(record)
+
+
+def load_hooks() -> None:
+    """Replace ``sys.excepthook`` and ``threading.excepthook`` with TraceRite."""
+    if sys.excepthook is not _tracerite_excepthook:
+        _state.original_excepthook = sys.excepthook
+        sys.excepthook = _tracerite_excepthook
+
+    if threading.excepthook is not _tracerite_threading_excepthook:
+        _state.original_threading_excepthook = threading.excepthook
+        threading.excepthook = _tracerite_threading_excepthook
+
+
+def unload_hooks() -> None:
+    """Restore the original ``sys.excepthook`` and ``threading.excepthook``."""
+    if _state.original_excepthook is not None:
+        sys.excepthook = _state.original_excepthook
+        _state.original_excepthook = None
+
+    if _state.original_threading_excepthook is not None:
+        threading.excepthook = _state.original_threading_excepthook
+        _state.original_threading_excepthook = None
+
+
+def load_logging_capture() -> None:
+    """Patch ``logging.StreamHandler.emit`` to format exceptions with TraceRite."""
+    if logging.StreamHandler.emit is not _tracerite_stream_handler_emit:
+        _state.original_stream_handler_emit = logging.StreamHandler.emit
+        type.__setattr__(logging.StreamHandler, "emit", _tracerite_stream_handler_emit)
+
+
+def unload_logging_capture() -> None:
+    """Restore the original ``logging.StreamHandler.emit``."""
+    if _state.original_stream_handler_emit is not None:
+        type.__setattr__(
+            logging.StreamHandler, "emit", _state.original_stream_handler_emit
+        )
+        _state.original_stream_handler_emit = None
+
+
+def load_suppressions(*, extra: dict[str, SuppressionValue] | None = None) -> None:
+    """Set ``__tracebackhide__`` on library modules whose frames should be hidden.
+
+    Args:
+        extra: Additional module names mapped to the value to assign to their
+            ``__tracebackhide__`` attribute. These are applied alongside the
+            built-in suppressions and are restored by ``unload_suppressions()``.
+    """
+    suppressions = _SUPPRESSIONS.copy()
+    if extra:
+        suppressions.update(extra)
+    for module_name, hide_value in suppressions.items():
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        old_value = getattr(module, "__tracebackhide__", Unset)
+        if old_value == hide_value:
+            # Already set to the desired value; nothing to restore on uninstall.
+            continue
+        if hide_value is Unset:
+            delattr(module, "__tracebackhide__")
+        else:
+            setattr(module, "__tracebackhide__", hide_value)  # noqa: B010
+        _state.suppressed[module] = old_value
+
+
+def unload_suppressions() -> None:
+    """Restore original ``__tracebackhide__`` values on suppressed modules."""
+    for module, old_value in _state.suppressed.items():
+        if old_value is Unset:
+            with contextlib.suppress(AttributeError):
+                delattr(module, "__tracebackhide__")
+        else:
+            setattr(module, "__tracebackhide__", old_value)  # noqa: B010
+    _state.suppressed.clear()
+
+
+def load(
+    *, hooks: bool = True, suppressions: bool = True, capture_logging: bool = True
+) -> None:
+    """Load TraceRite as the default exception handler.
+
+    Replaces sys.excepthook to use TraceRite's pretty TTY formatting
+    for all unhandled exceptions, including those in threads and
+    logging.exception() calls.
+    Call unload() to restore the original exception handlers.
+
+    Args:
+        hooks: Whether to install the exception hooks. Defaults to True.
+        suppressions: Whether to set __tracebackhide__ on listed modules.
+            Defaults to True.
+        capture_logging: Whether to monkeypatch logging.StreamHandler.emit
+            to format exceptions in logging.exception() calls. Defaults to True.
+
+    Usage:
+        import tracerite
+        tracerite.load()  # Installs hooks, suppressions and logging capture by default
+        tracerite.load(capture_logging=False)  # Installs hooks and suppressions only
+    """
+    if hooks:
+        load_hooks()
+    if capture_logging:
+        load_logging_capture()
+    if suppressions:
+        load_suppressions()
+
+
+def unload() -> None:
+    """Restore the original exception handlers.
+
+    Removes TraceRite from sys.excepthook, threading.excepthook, and
+    logging.StreamHandler.emit, restoring the previous handlers.
+    Also restores __tracebackhide__ values on modules modified by load().
+    """
+    unload_hooks()
+    unload_logging_capture()
+    unload_suppressions()
