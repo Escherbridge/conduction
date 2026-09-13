@@ -1,7 +1,9 @@
-sanic 
-datastar-py 
+sanic
+datastar-py
 aiosqlite
 markdown
 jinja2
 sqlalchemy
 alembic
+activegraph
+anthropic

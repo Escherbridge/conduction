@@ -5,7 +5,7 @@ from sqlalchemy import String, Integer, Text, DateTime, ForeignKey, select, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
-DATABASE_URL = 'sqlite+aiosqlire:///conduction.db'
+DATABASE_URL = 'sqlite+aiosqlite:///conduction.db'
 
 # Create Async Session Factory
 engine = create_async_engine(DATABASE_URL, echo=False)
@@ -41,44 +41,9 @@ class Track(Base):
     notes: Mapped[dict] = mapped_column(JSON, default=list)
     plan_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     spec_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
-    updated_at: Mapped[DateTime] = mapped_column(String(1024), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-async def get_db():
-    """returns the db connection"""
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA foreign_keys = ON;")
-    return db
-
-async def init_db():
-    """initialize those schemas"""
-
-    async with await get_db() as db:
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS projects (
-        id INTEGER PRIMAR KEY AUTOINCRMENT,
-        name TEXT NOT NULL, 
-        path TEXT UNIQUE NOT NULL, 
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_scanned_at TIMESTAMP
-    );
-    """)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS tracks (
-        id TEXT PRIMARY KEY,
-        project_id INTEGER NOT NULL, 
-        decription TEXT, 
-        type TEXT NOT NULL, 
-        status TEXT NOT NULL, 
-        created_at TEXT, 
-        alignment TEXT,
-        depends_on TEXT, --JSON ARRAY 
-        blocks TEXT, --JSON ARRAY 
-        notes TEXT, --JSON ARRAY 
-        plan_path TEXT, 
-        spec_path TEXT, 
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (project_id) REFERENCES project (id) ON DELETE CASCADE
-        );
-    """)
-        await db.commit()
+async def init_models():
+    """Initialize database schemas"""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)

@@ -2,24 +2,30 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=devicew-width, intial-scale=1.0">
-        <title>Conduction -- Project Track Kanban</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Conduction - Mission Monitor</title>
         <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
         <link rel="stylesheet" href="/static/css/styles.css">
     </head>
-    <body data-store="{ selectedProject: null, activeTab: 'plan' }">
+    <body>
         <div id="app-root">
             <header>
                 <h1>Conduction</h1>
-                <p>Manage conductor tracks in all my projects</p>
+                <p>Multi-agent mission monitoring and conductor track management</p>
             </header>
             <main id="main-content">
-                <button data-on-click="@get('/api/ping')">
-                    Ping  Server via Datastart SSE 
-                </button>
-                <div id="ping-result">Waiting for ping...</div>
+                <div style="background: white; border-radius: 8px; padding: 2rem; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <h2 style="margin-bottom: 1.5rem; color: #667eea;">Welcome to Conduction</h2>
+                    <p style="margin-bottom: 1rem; line-height: 1.6; color: #666;">
+                        Monitor multi-agent mission runs and manage conductor tracks across your projects.
+                    </p>
+                    <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+                        <a href="/runs" style="display: inline-block; padding: 0.75rem 1.5rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; border-radius: 6px; font-weight: 500; transition: transform 0.2s;">
+                            View Mission Runs →
+                        </a>
+                    </div>
+                </div>
             </main>
         </div>
-
     </body>
 </html>

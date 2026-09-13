@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross-Run Query - Conduction</title>
+    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .query-section {
+            margin: 2rem 0;
+            padding: 1.5rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #fff;
+        }
+        .query-section h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .search-form {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+        .search-form input {
+            padding: 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            flex: 1;
+            min-width: 200px;
+        }
+        .search-form button {
+            padding: 0.5rem 1.5rem;
+            background: #4a90e2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .search-form button:hover {
+            background: #357abd;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        th {
+            background: #f5f5f5;
+            font-weight: 600;
+            color: #555;
+        }
+        tr:hover {
+            background: #f9f9f9;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 2rem;
+            color: #999;
+        }
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #666;
+        }
+        .cost-value {
+            font-family: monospace;
+            color: #2c5aa0;
+        }
+        .status-rejected {
+            color: #e74c3c;
+            font-weight: 600;
+        }
+        .status-violated {
+            color: #d35400;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-root">
+        <header>
+            <h1>Conduction</h1>
+            <p>Cross-Run Query Engine</p>
+            <nav>
+                <a href="/">Home</a> | <a href="/runs">Runs</a>
+            </nav>
+        </header>
+        <main id="main-content">
+            <!-- Findings Query -->
+            <div class="query-section">
+                <h3>🔍 Search Findings</h3>
+                <form class="search-form" id="findings-form">
+                    <input type="text" id="text-filter" placeholder="Text search (substring)">
+                    <input type="text" id="worker-filter" placeholder="Worker name (exact)">
+                    <input type="text" id="runid-filter" placeholder="Run ID (exact)">
+                    <button type="submit">Search</button>
+                </form>
+                <div id="findings-container" class="loading">Click Search to query findings across all runs</div>
+            </div>
+
+            <!-- Costs Table -->
+            <div class="query-section">
+                <h3>💰 Cost Aggregates</h3>
+                <div id="costs-container" class="loading">Loading cost data...</div>
+            </div>
+
+            <!-- Claim Conflicts -->
+            <div class="query-section">
+                <h3>⚠️ Claim Conflicts</h3>
+                <div id="conflicts-container" class="loading">Loading claim conflicts...</div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Findings search
+        document.getElementById('findings-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const text = document.getElementById('text-filter').value;
+            const worker = document.getElementById('worker-filter').value;
+            const runId = document.getElementById('runid-filter').value;
+
+            const params = new URLSearchParams();
+            if (text) params.append('text', text);
+            if (worker) params.append('worker', worker);
+            if (runId) params.append('run_id', runId);
+
+            const container = document.getElementById('findings-container');
+            container.innerHTML = '<div class="loading">Searching...</div>';
+
+            try {
+                const response = await fetch(`/api/query/findings?${params}`);
+                const findings = await response.json();
+
+                if (findings.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No findings matched your query</div>';
+                    return;
+                }
+
+                container.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Run ID</th>
+                                <th>Slug</th>
+                                <th>Worker</th>
+                                <th>Topic</th>
+                                <th>Summary</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${findings.map(f => `
+                                <tr>
+                                    <td><a href="/runs/${f.run_id}">${f.run_id}</a></td>
+                                    <td>${f.slug || '-'}</td>
+                                    <td>${f.worker}</td>
+                                    <td>${f.topic}</td>
+                                    <td>${f.summary}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    <p style="margin-top: 1rem; color: #666; font-size: 0.9rem;">Found ${findings.length} result(s)</p>
+                `;
+            } catch (error) {
+                container.innerHTML = `<div class="empty-state">Error: ${error.message}</div>`;
+            }
+        });
+
+        // Load costs on page load
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Load costs
+            try {
+                const response = await fetch('/api/query/costs');
+                const data = await response.json();
+                const container = document.getElementById('costs-container');
+
+                if (data.by_run.length === 0 && data.by_agent.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No cost data available</div>';
+                    return;
+                }
+
+                container.innerHTML = `
+                    <h4>By Run</h4>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Run ID</th>
+                                <th>Slug</th>
+                                <th>Total Cost (USD)</th>
+                                <th>Total Turns</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.by_run.map(r => `
+                                <tr>
+                                    <td><a href="/runs/${r.run_id}">${r.run_id}</a></td>
+                                    <td>${r.slug || '-'}</td>
+                                    <td class="cost-value">$${(r.total_cost_usd || 0).toFixed(4)}</td>
+                                    <td>${r.total_turns || 0}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+
+                    <h4 style="margin-top: 2rem;">By Agent Name (across all runs)</h4>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Agent Name</th>
+                                <th>Total Cost (USD)</th>
+                                <th>Total Turns</th>
+                                <th>Run Count</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.by_agent.map(a => `
+                                <tr>
+                                    <td>${a.agent_name}</td>
+                                    <td class="cost-value">$${(a.total_cost_usd || 0).toFixed(4)}</td>
+                                    <td>${a.total_turns || 0}</td>
+                                    <td>${a.run_count}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            } catch (error) {
+                document.getElementById('costs-container').innerHTML =
+                    `<div class="empty-state">Error loading costs: ${error.message}</div>`;
+            }
+
+            // Load conflicts
+            try {
+                const response = await fetch('/api/query/claims/conflicts');
+                const conflicts = await response.json();
+                const container = document.getElementById('conflicts-container');
+
+                if (conflicts.length === 0) {
+                    container.innerHTML = '<div class="empty-state">✓ No claim conflicts found</div>';
+                    return;
+                }
+
+                container.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Run ID</th>
+                                <th>Slug</th>
+                                <th>Path</th>
+                                <th>Owner</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${conflicts.map(c => `
+                                <tr>
+                                    <td><a href="/runs/${c.run_id}">${c.run_id}</a></td>
+                                    <td>${c.slug || '-'}</td>
+                                    <td style="font-family: monospace; font-size: 0.9rem;">${c.path}</td>
+                                    <td>${c.owner}</td>
+                                    <td class="status-${c.status}">${c.status}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    <p style="margin-top: 1rem; color: #e74c3c; font-size: 0.9rem;">Found ${conflicts.length} conflict(s)</p>
+                `;
+            } catch (error) {
+                document.getElementById('conflicts-container').innerHTML =
+                    `<div class="empty-state">Error loading conflicts: ${error.message}</div>`;
+            }
+        });
+    </script>
+</body>
+</html>

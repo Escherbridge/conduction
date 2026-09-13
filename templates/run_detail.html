@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Run Detail - Conduction</title>
+    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div id="app-root">
+        <header>
+            <h1>Conduction</h1>
+            <p>Mission Run Detail</p>
+            <nav>
+                <a href="/runs">← Back to Runs</a>
+            </nav>
+        </header>
+        <main id="main-content">
+            <div class="run-detail">
+                <h2 id="run-title">Loading...</h2>
+                <div class="run-info" id="run-info">
+                    <div class="run-info-item">
+                        <span class="run-info-label">Status</span>
+                        <span class="run-info-value" id="run-status">-</span>
+                    </div>
+                    <div class="run-info-item">
+                        <span class="run-info-label">Started</span>
+                        <span class="run-info-value" id="run-started">-</span>
+                    </div>
+                </div>
+
+                <!-- Mission Steering Controls -->
+                <div class="mission-controls" style="margin: 1.5rem 0; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;">
+                    <h3 style="margin-top: 0;">Mission Controls</h3>
+
+                    <!-- Interrupt Button (shown only when running) -->
+                    <div id="interrupt-control" style="display: none; margin-bottom: 1rem;">
+                        <button id="interrupt-btn" style="padding: 0.5rem 1rem; background: #e74c3c; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            Interrupt Mission
+                        </button>
+                        <span id="interrupt-status" style="margin-left: 1rem; color: #666;"></span>
+                    </div>
+
+                    <!-- Resume Form -->
+                    <div id="resume-control">
+                        <h4 style="margin-top: 0;">Resume with Edits</h4>
+                        <div id="agent-brief-editors"></div>
+                        <button id="resume-btn" style="padding: 0.5rem 1rem; background: #4a90e2; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 1rem;">
+                            Resume Mission
+                        </button>
+                        <span id="resume-status" style="margin-left: 1rem; color: #666;"></span>
+                    </div>
+                </div>
+
+                <div class="swimlanes-container">
+                    <div class="swimlanes-header">
+                        <h3>Agent Swim Lanes</h3>
+                        <div style="font-size: 0.85rem; color: #666;">
+                            <span style="display: inline-block; margin-right: 1rem;">
+                                <span style="display: inline-block; width: 12px; height: 12px; background: #4a90e2; border-radius: 50%; margin-right: 4px;"></span>
+                                Request
+                            </span>
+                            <span style="display: inline-block; margin-right: 1rem;">
+                                <span style="display: inline-block; width: 12px; height: 12px; background: #50c878; border-radius: 50%; margin-right: 4px;"></span>
+                                Response
+                            </span>
+                            <span style="display: inline-block; margin-right: 1rem;">
+                                <span style="display: inline-block; width: 12px; height: 12px; background: #9b59b6; border-radius: 50%; margin-right: 4px;"></span>
+                                Claim OK
+                            </span>
+                            <span style="display: inline-block; margin-right: 1rem;">
+                                <span style="display: inline-block; width: 12px; height: 12px; background: #e74c3c; border-radius: 50%; margin-right: 4px;"></span>
+                                Claim Rejected
+                            </span>
+                            <span style="display: inline-block;">
+                                <span style="display: inline-block; width: 12px; height: 12px; background: #f39c12; border-radius: 50%; margin-right: 4px;"></span>
+                                Finding
+                            </span>
+                        </div>
+                    </div>
+                    <div id="swimlanes"></div>
+                </div>
+
+                <div class="findings-section">
+                    <h3>Findings</h3>
+                    <div id="findings"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const RUN_ID = window.location.pathname.split('/').pop();
+        const agentEvents = {}; // Store events by agent name
+        const agentData = {}; // Store agent metadata
+        let eventTimeRange = { min: Infinity, max: -Infinity };
+        let findings = [];
+
+        // Initialize on page load
+        window.addEventListener('DOMContentLoaded', async () => {
+            document.getElementById('run-title').textContent = RUN_ID;
+
+            // Fetch agents
+            await fetchAgents();
+
+            // Fetch findings
+            await fetchFindings();
+
+            // Set up SSE for live events
+            setupEventStream();
+
+            // Set up mission controls
+            setupMissionControls();
+        });
+
+        async function fetchAgents() {
+            try {
+                const response = await fetch(`/api/runs/${RUN_ID}/agents`);
+                const agents = await response.json();
+
+                agents.forEach(agent => {
+                    agentData[agent.name] = agent;
+                    agentEvents[agent.name] = [];
+                });
+
+                renderSwimLanes();
+            } catch (error) {
+                console.error('Error fetching agents:', error);
+            }
+        }
+
+        async function fetchFindings() {
+            try {
+                const response = await fetch(`/api/runs/${RUN_ID}/findings`);
+                findings = await response.json();
+                renderFindings();
+            } catch (error) {
+                console.error('Error fetching findings:', error);
+            }
+        }
+
+        function setupEventStream() {
+            const eventSource = new EventSource(`/api/runs/${RUN_ID}/events`);
+
+            // Listen for all SSE messages to parse event data
+            eventSource.onmessage = (e) => {
+                try {
+                    // Parse datastar fragment to extract event data
+                    // Format: <div data-seq="{seq}">{type} by {actor}</div>
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(e.data, 'text/html');
+                    const eventDiv = doc.querySelector('div[data-seq]');
+
+                    if (eventDiv) {
+                        const seq = parseInt(eventDiv.getAttribute('data-seq'));
+                        const text = eventDiv.textContent.trim();
+                        const match = text.match(/^(.+?)\s+by\s+(.+)$/);
+
+                        if (match) {
+                            const type = match[1];
+                            const actor = match[2];
+                            const ts = Date.now(); // Approximate timestamp
+
+                            // Initialize agent events array if needed
+                            if (!agentEvents[actor]) {
+                                agentEvents[actor] = [];
+                            }
+
+                            // Avoid duplicates based on seq
+                            if (!agentEvents[actor].find(ev => ev.seq === seq)) {
+                                agentEvents[actor].push({ seq, type, actor, ts });
+
+                                // Update time range
+                                eventTimeRange.min = Math.min(eventTimeRange.min, ts);
+                                eventTimeRange.max = Math.max(eventTimeRange.max, ts);
+
+                                // Re-render timelines
+                                renderSwimLanes();
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error processing SSE message:', error);
+                }
+            };
+
+            eventSource.onerror = (error) => {
+                console.error('SSE connection error:', error);
+            };
+
+            // Also poll for findings updates
+            pollUpdates();
+        }
+
+        async function pollUpdates() {
+            // Poll for findings and agent status updates
+            setInterval(async () => {
+                await fetchFindings();
+                await fetchAgents();
+                renderSwimLanes();
+            }, 3000);
+        }
+
+        function renderSwimLanes() {
+            const container = document.getElementById('swimlanes');
+
+            if (Object.keys(agentData).length === 0) {
+                container.innerHTML = '<div class="loading">Loading agents</div>';
+                return;
+            }
+
+            container.innerHTML = Object.entries(agentData).map(([name, agent]) => {
+                const events = agentEvents[name] || [];
+
+                return `
+                    <div class="swimlane">
+                        <div class="swimlane-header">
+                            <span class="swimlane-title">${name}</span>
+                            <div class="swimlane-meta">
+                                <div class="swimlane-meta-item">
+                                    <span class="swimlane-meta-label">Status</span>
+                                    <span class="swimlane-meta-value">${agent.status || 'unknown'}</span>
+                                </div>
+                                <div class="swimlane-meta-item">
+                                    <span class="swimlane-meta-label">Model</span>
+                                    <span class="swimlane-meta-value">${agent.model || '-'}</span>
+                                </div>
+                                <div class="swimlane-meta-item">
+                                    <span class="swimlane-meta-label">Turns</span>
+                                    <span class="swimlane-meta-value">${agent.turns || 0}</span>
+                                </div>
+                                <div class="swimlane-meta-item">
+                                    <span class="swimlane-meta-label">Cost</span>
+                                    <span class="swimlane-meta-value">$${(agent.cost_usd || 0).toFixed(4)}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="timeline">
+                            <div class="timeline-track">
+                                <div class="timeline-events">
+                                    ${renderTimelineEvents(events)}
+                                </div>
+                            </div>
+                        </div>
+                        ${renderAgentFindings(name)}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderTimelineEvents(events) {
+            if (events.length === 0) {
+                return '<div style="text-align: center; color: #999; font-size: 0.85rem; padding: 0.5rem;">No events yet</div>';
+            }
+
+            // Calculate positions based on timestamps
+            const range = eventTimeRange.max - eventTimeRange.min || 1;
+
+            return events.map(event => {
+                const position = ((event.ts - eventTimeRange.min) / range) * 100;
+                const eventClass = event.type.toLowerCase().replace('.', '-');
+
+                return `
+                    <div class="timeline-event ${eventClass}"
+                         style="left: ${position}%"
+                         title="${event.type} at ${new Date(event.ts).toLocaleTimeString()}">
+                        <div class="event-tooltip">${event.type}<br/>${new Date(event.ts).toLocaleTimeString()}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderAgentFindings(agentName) {
+            const agentFindings = findings.filter(f => f.worker === agentName);
+
+            if (agentFindings.length === 0) {
+                return '';
+            }
+
+            return `
+                <div style="margin-top: 1rem;">
+                    ${agentFindings.map(f => `
+                        <div class="finding-item">
+                            <div class="finding-header">
+                                <span class="finding-topic">${f.topic}</span>
+                            </div>
+                            <div class="finding-summary">${f.summary}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function renderFindings() {
+            const container = document.getElementById('findings');
+
+            if (findings.length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>No findings yet</p></div>';
+                return;
+            }
+
+            container.innerHTML = findings.map(f => `
+                <div class="finding-item">
+                    <div class="finding-header">
+                        <span class="finding-topic">${f.topic}</span>
+                        <span class="finding-worker">by ${f.worker}</span>
+                    </div>
+                    <div class="finding-summary">${f.summary}</div>
+                </div>
+            `).join('');
+        }
+
+        function setupMissionControls() {
+            // Set up interrupt button
+            const interruptBtn = document.getElementById('interrupt-btn');
+            const interruptControl = document.getElementById('interrupt-control');
+            const interruptStatus = document.getElementById('interrupt-status');
+
+            interruptBtn.addEventListener('click', async () => {
+                interruptBtn.disabled = true;
+                interruptStatus.textContent = 'Sending interrupt signal...';
+
+                try {
+                    const response = await fetch(`/api/runs/${RUN_ID}/interrupt`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        interruptStatus.textContent = '✓ Interrupt signal sent';
+                        interruptStatus.style.color = '#50c878';
+                    } else {
+                        interruptStatus.textContent = `✗ ${data.error || 'Failed'}`;
+                        interruptStatus.style.color = '#e74c3c';
+                        interruptBtn.disabled = false;
+                    }
+                } catch (error) {
+                    interruptStatus.textContent = `✗ Error: ${error.message}`;
+                    interruptStatus.style.color = '#e74c3c';
+                    interruptBtn.disabled = false;
+                }
+            });
+
+            // Check run status and show/hide interrupt button
+            checkRunStatus();
+
+            // Set up resume controls
+            renderAgentBriefEditors();
+
+            const resumeBtn = document.getElementById('resume-btn');
+            const resumeStatus = document.getElementById('resume-status');
+
+            resumeBtn.addEventListener('click', async () => {
+                resumeBtn.disabled = true;
+                resumeStatus.textContent = 'Launching resumed mission...';
+
+                // Collect edited briefs
+                const agentEdits = [];
+                Object.keys(agentData).forEach(name => {
+                    const textarea = document.getElementById(`brief-${name}`);
+                    if (textarea) {
+                        const newBrief = textarea.value;
+                        if (newBrief !== agentData[name].originalBrief) {
+                            agentEdits.push({
+                                name: name,
+                                brief: newBrief,
+                                tools: agentData[name].tools || ['Read', 'Grep', 'Glob']
+                            });
+                        }
+                    }
+                });
+
+                // Build original agents list
+                const originalAgents = Object.keys(agentData).map(name => ({
+                    name: name,
+                    brief: agentData[name].originalBrief || 'No brief recorded',
+                    tools: agentData[name].tools || ['Read', 'Grep', 'Glob']
+                }));
+
+                try {
+                    const response = await fetch(`/api/runs/${RUN_ID}/resume`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            original_agents: originalAgents,
+                            agent_edits: agentEdits,
+                            synthesis: null,
+                            max_turns: 30,
+                            max_concurrency: 4
+                        })
+                    });
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        resumeStatus.textContent = `✓ Resumed as ${data.run_id}`;
+                        resumeStatus.style.color = '#50c878';
+                        setTimeout(() => {
+                            window.location.href = `/runs/${data.run_id}`;
+                        }, 1500);
+                    } else {
+                        resumeStatus.textContent = `✗ ${data.error || 'Failed'}`;
+                        resumeStatus.style.color = '#e74c3c';
+                        resumeBtn.disabled = false;
+                    }
+                } catch (error) {
+                    resumeStatus.textContent = `✗ Error: ${error.message}`;
+                    resumeStatus.style.color = '#e74c3c';
+                    resumeBtn.disabled = false;
+                }
+            });
+        }
+
+        async function checkRunStatus() {
+            // Poll run status from the mirror
+            const statusSpan = document.getElementById('run-status');
+            const interruptControl = document.getElementById('interrupt-control');
+
+            // Simple check: if any agent status is 'running', show interrupt button
+            const hasRunning = Object.values(agentData).some(a => a.status === 'running');
+
+            if (hasRunning) {
+                statusSpan.textContent = 'running';
+                interruptControl.style.display = 'block';
+            } else {
+                const statuses = Object.values(agentData).map(a => a.status);
+                if (statuses.every(s => s === 'completed')) {
+                    statusSpan.textContent = 'completed';
+                } else if (statuses.some(s => s === 'errored')) {
+                    statusSpan.textContent = 'errored';
+                } else {
+                    statusSpan.textContent = 'unknown';
+                }
+            }
+        }
+
+        function renderAgentBriefEditors() {
+            const container = document.getElementById('agent-brief-editors');
+
+            if (Object.keys(agentData).length === 0) {
+                container.innerHTML = '<p style="color: #999;">Loading agents...</p>';
+                return;
+            }
+
+            container.innerHTML = Object.entries(agentData).map(([name, agent]) => {
+                // Store original brief for comparison
+                agent.originalBrief = `[Original brief not available from mirror - edit for resume]`;
+
+                return `
+                    <div style="margin-bottom: 1rem;">
+                        <label style="display: block; font-weight: bold; margin-bottom: 0.25rem;">
+                            ${name}
+                        </label>
+                        <textarea
+                            id="brief-${name}"
+                            rows="3"
+                            style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 0.9rem;"
+                        >${agent.originalBrief}</textarea>
+                    </div>
+                `;
+            }).join('');
+        }
+    </script>
+</body>
+</html>

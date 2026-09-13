@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mission Runs - Conduction</title>
+    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body data-store="{ runs: [], loading: true }">
+    <div id="app-root">
+        <header>
+            <h1>Conduction</h1>
+            <p>Mission Run Monitor</p>
+            <nav>
+                <a href="/">Home</a>
+            </nav>
+        </header>
+        <main id="main-content">
+            <div class="runs-list">
+                <h2>Mission Runs</h2>
+                <div id="runs-container" data-on-load="@get('/api/runs')"></div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Fetch and render runs on page load
+        window.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const response = await fetch('/api/runs');
+                const runs = await response.json();
+
+                const container = document.getElementById('runs-container');
+
+                if (runs.length === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📋</div>
+                            <p>No mission runs found</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                container.innerHTML = runs.map(run => `
+                    <div class="run-item">
+                        <div>
+                            <a href="/runs/${run.run_id}">${run.run_id}</a>
+                            ${run.slug ? `<div style="font-size: 0.85rem; color: #666; margin-top: 0.25rem;">${run.slug}</div>` : ''}
+                        </div>
+                        <div class="run-meta">
+                            <span>${new Date(run.started_at).toLocaleString()}</span>
+                            <span class="run-status ${run.status || 'running'}">${run.status || 'running'}</span>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error fetching runs:', error);
+                document.getElementById('runs-container').innerHTML = `
+                    <div class="empty-state">
+                        <p>Error loading runs: ${error.message}</p>
+                    </div>
+                `;
+            }
+        });
+    </script>
+</body>
+</html>
