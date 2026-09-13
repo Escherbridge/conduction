@@ -89,7 +89,11 @@ class WorkerAPI:
         return {SERVER_NAME: build_graph_server(self.host, self.request, self.request_event)}
 
     def hooks(self) -> dict[str, Any]:
-        """`PreToolUse` claim enforcement for this call."""
+        """`PreToolUse` claim and destructive-command enforcement for this call.
+
+        One matcher with no `matcher=` filter, so the hook sees every tool —
+        writes are gated on the ledger, `Bash`/`PowerShell` on the command
+        policy."""
         from claude_agent_sdk import HookMatcher
 
         return {

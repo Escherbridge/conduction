@@ -125,9 +125,42 @@ main {
     color: #856404;
 }
 
-.run-status.errored {
+.run-status.errored,
+.run-status.failed {
     background: #f8d7da;
     color: #721c24;
+}
+
+.run-status.stale {
+    background: #e2e3e5;
+    color: #41464b;
+}
+
+/* Repo Badges */
+.run-item-badges {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+}
+
+.repo-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    background: #eef1ff;
+    color: #4a4fc4;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.repo-key-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    background: #f0f0f0;
+    color: #888;
+    font-size: 0.7rem;
+    font-family: monospace;
 }
 
 /* Run Detail */
@@ -170,6 +203,61 @@ main {
 .run-info-value {
     font-size: 1.1rem;
     color: #333;
+}
+
+.run-info-value.run-status {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.run-info-value.connection-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.mission-completion-pill {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin: 1rem 0;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    background: #f8f9fa;
+}
+
+.mission-completion-pill.completed {
+    background: #d4edda;
+}
+
+.mission-completion-pill.failed {
+    background: #f8d7da;
+}
+
+.mission-completion-status {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.mission-completion-pill.completed .mission-completion-status {
+    color: #155724;
+}
+
+.mission-completion-pill.failed .mission-completion-status {
+    color: #721c24;
+}
+
+.mission-completion-detail {
+    font-size: 0.9rem;
+    color: #555;
 }
 
 /* Swim Lanes */
@@ -293,12 +381,33 @@ main {
     background: #9b59b6;
 }
 
-.timeline-event.claim-rejected {
+.timeline-event.claim-rejected,
+.timeline-event.claim-violated {
     background: #e74c3c;
 }
 
 .timeline-event.finding-recorded {
     background: #f39c12;
+}
+
+.timeline-event.agent-responded-error {
+    background: #e74c3c;
+}
+
+.timeline-event.command-violated {
+    background: #d35400;
+    border-radius: 3px;
+    transform: rotate(45deg);
+}
+
+.timeline-event.command-violated:hover {
+    transform: rotate(45deg) scale(1.5);
+}
+
+.timeline-event.mission-completed {
+    background: #2ecc71;
+    width: 14px;
+    height: 14px;
 }
 
 /* Findings */

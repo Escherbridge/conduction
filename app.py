@@ -1,8 +1,13 @@
 import os
 import asyncio
+import hashlib
 import json as stdlib_json
+import re
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote
 from sanic import Sanic
 from sanic.response import html, json as sanic_json
 from datastar_py import ServerSentEventGenerator as SSE
@@ -11,106 +16,329 @@ from agentgraph.sqlite_sink import SqliteMirror
 from agentgraph import Mission, AgentSpec
 from agentgraph.mission import EDIT_TOOLS, READ_TOOLS
 
+APP_ROOT = Path(__file__).resolve().parent
+KNOWN_REPOS_PATH = APP_ROOT / ".agentgraph" / "known_repos.json"
+MIRROR_DB_PATH = APP_ROOT / ".agentgraph" / "missions.db"
+
+SLUG_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+MAX_CONCURRENT_MISSIONS = 4
+MISSION_JOIN_TIMEOUT_SECONDS = 30
+STREAM_POLL_INTERVAL_SECONDS = 2
+STREAM_MAX_DURATION_SECONDS = 2 * 60 * 60
+TERMINAL_RUN_STATUSES = ("completed", "failed", "errored", "stale")
+# A run this process did not launch, whose log has not grown for this long and
+# never recorded mission.completed (pre-hardening logs), is reported as stale
+# so its stream can end instead of polling until the 2 h cap.
+STALE_RUN_SECONDS = 600
+DEFAULT_MISSION_MODEL = "claude-sonnet-4-5-20250929"
+
 app = Sanic("ConductionApp")
+# Sanic hands path params over still percent-encoded; run ids contain "@".
+app.router.register_pattern("runid", unquote, r"[^/]+")
 
-app.static("/static", "./static")
+app.static("/static", str(APP_ROOT / "static"))
 
-# Initialize SqliteMirror and mission process tracking on app startup
+
+@dataclass(frozen=True)
+class RunRef:
+    """A run on disk, addressed by the composite app-level run_id."""
+
+    run_id: str
+    slug: str
+    target_repo: Path
+    log_path: Path
+    run_dir: Path
+
+
+def repo_key(target_repo: Path | str) -> str:
+    return hashlib.sha1(str(Path(target_repo).resolve()).lower().encode()).hexdigest()[:8]
+
+
+def compose_run_id(slug: str, target_repo: Path | str) -> str:
+    return f"MISSION-{slug}@{repo_key(target_repo)}"
+
+
+def read_known_repos() -> list[str]:
+    if not KNOWN_REPOS_PATH.exists():
+        return []
+    try:
+        entries = stdlib_json.loads(KNOWN_REPOS_PATH.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, str)]
+
+
+def remember_repo(target_repo: Path) -> None:
+    known_repos = read_known_repos()
+    target_repo_str = str(target_repo.resolve())
+    if any(existing.lower() == target_repo_str.lower() for existing in known_repos):
+        return
+    known_repos.append(target_repo_str)
+    KNOWN_REPOS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    KNOWN_REPOS_PATH.write_text(stdlib_json.dumps(known_repos, indent=2), encoding="utf-8")
+
+
+def allowed_repo_roots() -> list[Path]:
+    configured = os.environ.get("CONDUCTION_ALLOWED_ROOTS", "").strip()
+    if not configured:
+        return [Path.home().resolve()]
+    roots = []
+    for entry in configured.split(os.pathsep):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            roots.append(Path(entry).resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def validate_slug(slug: object) -> tuple[str | None, str | None]:
+    if not isinstance(slug, str) or not SLUG_PATTERN.match(slug):
+        return None, "slug must match ^[A-Za-z0-9._-]{1,64}$"
+    if ".." in slug:
+        return None, "slug must not contain '..'"
+    return slug, None
+
+
+def validate_target_repo(raw_target_repo: object) -> tuple[Path | None, str | None]:
+    if not isinstance(raw_target_repo, str) or not raw_target_repo.strip():
+        return None, "target_repo is required"
+    try:
+        target_repo = Path(raw_target_repo).expanduser().resolve()
+    except OSError:
+        return None, f"target_repo is not a usable path: {raw_target_repo}"
+    if not target_repo.is_dir():
+        return None, f"target_repo does not exist or is not a directory: {raw_target_repo}"
+    if target_repo == APP_ROOT:
+        return target_repo, None
+    target_repo_str = str(target_repo)
+    for known in read_known_repos():
+        try:
+            if str(Path(known).resolve()).lower() == target_repo_str.lower():
+                return target_repo, None
+        except OSError:
+            continue
+    for root in allowed_repo_roots():
+        if target_repo == root or target_repo.is_relative_to(root):
+            return target_repo, None
+    return None, (
+        f"target_repo is outside the allowed roots: {raw_target_repo}. "
+        "Set CONDUCTION_ALLOWED_ROOTS to permit it."
+    )
+
+
+def repos_to_scan() -> list[Path]:
+    repos = [APP_ROOT]
+    seen = {repo_key(APP_ROOT)}
+    for entry in read_known_repos():
+        try:
+            resolved = Path(entry).resolve()
+        except OSError:
+            continue
+        key = repo_key(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        repos.append(resolved)
+    return repos
+
+
+def resolve_runs(app) -> list[RunRef]:
+    """Every run.jsonl under conduction's own repo plus every known repo."""
+    refs: list[RunRef] = []
+    for repo in repos_to_scan():
+        runs_dir = repo / ".agentgraph" / "runs"
+        if not runs_dir.is_dir():
+            continue
+        key = repo_key(repo)
+        for log_path in sorted(runs_dir.rglob("run.jsonl")):
+            run_dir = log_path.parent
+            slug = run_dir.name
+            refs.append(
+                RunRef(
+                    run_id=f"MISSION-{slug}@{key}",
+                    slug=slug,
+                    target_repo=repo,
+                    log_path=log_path,
+                    run_dir=run_dir,
+                )
+            )
+    return refs
+
+
+def find_run(app, run_id: str) -> RunRef | None:
+    for ref in resolve_runs(app):
+        if ref.run_id == run_id:
+            return ref
+    return None
+
+
+def mirror_run(app, ref: RunRef) -> None:
+    app.ctx.mirror.mirror_log_file(ref.run_id, ref.log_path, target_repo=str(ref.target_repo))
+
+
+def is_managed_and_alive(app, run_id: str) -> bool:
+    entry = app.ctx.mission_processes.get(run_id)
+    return bool(entry and entry["thread"].is_alive())
+
+
+def effective_status(app, run_id: str, recorded_status: str | None) -> str | None:
+    if recorded_status != "running" or is_managed_and_alive(app, run_id):
+        return recorded_status
+    ref = find_run(app, run_id)
+    if ref is None or not ref.log_path.exists():
+        return recorded_status
+    if time.time() - ref.log_path.stat().st_mtime > STALE_RUN_SECONDS:
+        return "stale"
+    return recorded_status
+
+
+def mirror_runs(app, refs: list[RunRef]) -> None:
+    for ref in refs:
+        mirror_run(app, ref)
+
+
+def fetch_rows_blocking(app, query: str, params: tuple) -> list:
+    return app.ctx.mirror._ensure_open().execute(query, params).fetchall()
+
+
+async def fetch_rows(app, query: str, params: tuple = ()) -> list:
+    # One sqlite connection shared across worker threads: the lock serializes it.
+    async with app.ctx.mirror_lock:
+        return await asyncio.to_thread(fetch_rows_blocking, app, query, tuple(params))
+
+
+async def mirror_all_runs(app) -> list[RunRef]:
+    refs = await asyncio.to_thread(resolve_runs, app)
+    async with app.ctx.mirror_lock:
+        await asyncio.to_thread(mirror_runs, app, refs)
+    return refs
+
+
+async def mirror_single_run(app, ref: RunRef) -> None:
+    async with app.ctx.mirror_lock:
+        await asyncio.to_thread(mirror_run, app, ref)
+
+
+def purge_legacy_run_ids(app) -> None:
+    """Rows written before composite run ids exist would double every run in the UI."""
+    connection = app.ctx.mirror._ensure_open()
+    for table in ("runs", "agents", "events", "findings", "claims"):
+        connection.execute(f"DELETE FROM {table} WHERE run_id NOT LIKE '%@%'")
+    connection.commit()
+
+
+def reap_mission_threads(app) -> None:
+    for entry in app.ctx.mission_processes.values():
+        if entry["status"] == "running" and not entry["thread"].is_alive():
+            entry["status"] = "finished"
+
+
+def active_mission_count(app) -> int:
+    reap_mission_threads(app)
+    return sum(1 for entry in app.ctx.mission_processes.values() if entry["status"] == "running")
+
+
+def join_mission_threads(threads: list[threading.Thread], timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        thread.join(remaining)
+
+
 @app.before_server_start
 async def setup_mirror(app):
     """Initialize the SqliteMirror instance and mission process tracker on app.ctx"""
-    mirror_db_path = Path(".agentgraph/missions.db")
-    app.ctx.mirror = SqliteMirror(mirror_db_path)
-    # Track running missions: {run_id: {"thread": Thread, "slug": str, "log_path": Path}}
+    app.ctx.mirror = SqliteMirror(MIRROR_DB_PATH)
+    app.ctx.mirror_lock = asyncio.Lock()
     app.ctx.mission_processes = {}
+    async with app.ctx.mirror_lock:
+        await asyncio.to_thread(purge_legacy_run_ids, app)
+
+
+@app.before_server_stop
+async def stop_missions(app):
+    """Signal every tracked mission and give its thread a bounded chance to unwind"""
+    for entry in app.ctx.mission_processes.values():
+        entry["stop_event"].set()
+    threads = [
+        entry["thread"]
+        for entry in app.ctx.mission_processes.values()
+        if entry["thread"].is_alive()
+    ]
+    if threads:
+        await asyncio.to_thread(join_mission_threads, threads, MISSION_JOIN_TIMEOUT_SECONDS)
+
 
 def render_template(filename: str) -> str:
-    path = os.path.join(os.path.dirname(__file__), "templates", filename)
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    path = APP_ROOT / "templates" / filename
+    return path.read_text(encoding="utf-8")
+
 
 @app.get("/")
 async def home(request):
-        """Serves the main app"""
-        return html(render_template("index.html"))
+    """Serves the main app"""
+    return html(render_template("index.html"))
+
 
 @app.get("/runs")
 async def runs_list(request):
     """Serves the runs list view"""
     return html(render_template("runs_list.html"))
 
-@app.get("/runs/<run_id:str>")
+
+@app.get("/runs/<run_id:runid>")
 async def run_detail(request, run_id: str):
     """Serves the run detail view"""
     return html(render_template("run_detail.html"))
 
+
 @app.get("/api/runs")
 async def list_runs(request):
     """List all mission runs, mirroring any new ones found on disk from all known repos"""
-    mirror: SqliteMirror = request.app.ctx.mirror
-
-    # Collect repos to scan: conduction's own + known_repos.json
-    repos_to_scan = [Path.cwd()]  # Conduction's own repo
-    known_repos_path = Path(".agentgraph/known_repos.json")
-    if known_repos_path.exists():
-        known_repos = stdlib_json.loads(known_repos_path.read_text())
-        repos_to_scan.extend([Path(repo) for repo in known_repos])
-
-    # Scan each repo's .agentgraph/runs/ for run.jsonl files
-    for repo_path in repos_to_scan:
-        runs_dir = repo_path / ".agentgraph" / "runs"
-        if not runs_dir.exists():
-            continue
-
-        for run_jsonl in runs_dir.rglob("run.jsonl"):
-            # Extract run_id from the jsonl file's parent directory structure
-            relative_path = run_jsonl.relative_to(runs_dir)
-            run_id = f"MISSION-{relative_path.parent.name}"
-
-            # Mirror this run with target_repo info
-            target_repo_str = str(repo_path.resolve())
-            mirror.mirror_log_file(run_id, run_jsonl, target_repo_str)
-
-    # Query all runs from the mirror
-    conn = mirror._ensure_open()
-    cursor = conn.execute(
-        "SELECT run_id, slug, started_at, status, target_repo FROM runs ORDER BY started_at DESC"
+    await mirror_all_runs(request.app)
+    rows = await fetch_rows(
+        request.app,
+        "SELECT run_id, slug, started_at, status, target_repo FROM runs ORDER BY started_at DESC",
     )
     runs = [
         {
             "run_id": row[0],
             "slug": row[1],
             "started_at": row[2],
-            "status": row[3],
-            "target_repo": row[4]
+            "status": effective_status(request.app, row[0], row[3]),
+            "target_repo": row[4],
         }
-        for row in cursor.fetchall()
+        for row in rows
     ]
-
     return sanic_json(runs)
 
-@app.get("/api/runs/<run_id:str>/agents")
+
+@app.get("/api/runs/<run_id:runid>/agents")
 async def get_run_agents(request, run_id: str):
     """Return agents for a specific run"""
-    mirror: SqliteMirror = request.app.ctx.mirror
-    conn = mirror._ensure_open()
-
-    # Get run info including target_repo
-    run_cursor = conn.execute(
+    run_rows = await fetch_rows(
+        request.app,
         "SELECT target_repo FROM runs WHERE run_id = ?",
-        (run_id,)
+        (run_id,),
     )
-    run_row = run_cursor.fetchone()
-    target_repo = run_row[0] if run_row else None
+    target_repo = run_rows[0][0] if run_rows else None
 
-    cursor = conn.execute(
+    agent_rows = await fetch_rows(
+        request.app,
         """
         SELECT name, model, status, cost_usd, turns, error
         FROM agents
         WHERE run_id = ?
         ORDER BY name
         """,
-        (run_id,)
+        (run_id,),
     )
     agents = [
         {
@@ -119,127 +347,129 @@ async def get_run_agents(request, run_id: str):
             "status": row[2],
             "cost_usd": row[3],
             "turns": row[4],
-            "error": row[5]
+            "error": row[5],
         }
-        for row in cursor.fetchall()
+        for row in agent_rows
     ]
-
     return sanic_json({"agents": agents, "target_repo": target_repo})
 
-@app.get("/api/runs/<run_id:str>/events")
-@datastar_response
+
+@app.get("/api/runs/<run_id:runid>/events")
 async def stream_run_events(request, run_id: str):
-    """SSE stream of events for a run, re-mirroring every ~2s to pick up new events"""
-    mirror: SqliteMirror = request.app.ctx.mirror
+    """Plain text/event-stream of run events: named `run-event` frames, then `run-complete`"""
+    current_app = request.app
+    ref = await asyncio.to_thread(find_run, current_app, run_id)
+    if ref is None:
+        return sanic_json({"error": f"Run not found: {run_id}"}, status=404)
 
-    # Collect repos to scan
-    repos_to_scan = [Path.cwd()]
-    known_repos_path = Path(".agentgraph/known_repos.json")
-    if known_repos_path.exists():
-        known_repos = stdlib_json.loads(known_repos_path.read_text())
-        repos_to_scan.extend([Path(repo) for repo in known_repos])
-
-    # Find the run.jsonl file for this run_id across all repos
-    run_jsonl = None
-    target_repo = None
-    for repo_path in repos_to_scan:
-        runs_dir = repo_path / ".agentgraph" / "runs"
-        if not runs_dir.exists():
-            continue
-        for candidate in runs_dir.rglob("run.jsonl"):
-            relative_path = candidate.relative_to(runs_dir)
-            candidate_run_id = f"MISSION-{relative_path.parent.name}"
-            if candidate_run_id == run_id:
-                run_jsonl = candidate
-                target_repo = str(repo_path.resolve())
-                break
-        if run_jsonl:
-            break
-
-    if not run_jsonl:
-        yield SSE.patch_elements('<div>Run not found</div>')
-        return
+    response = await request.respond(
+        content_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
     last_seq = 0
+    deadline = time.monotonic() + STREAM_MAX_DURATION_SECONDS
 
-    while True:
-        # Re-mirror to pick up any new events
-        mirror.mirror_log_file(run_id, run_jsonl, target_repo)
+    async def send_frame(event_name: str, data: dict) -> bool:
+        transport = getattr(request, "transport", None)
+        if transport is None or transport.is_closing():
+            return False
+        try:
+            await response.send(f"event: {event_name}\ndata: {stdlib_json.dumps(data)}\n\n")
+        except Exception:
+            return False
+        return True
 
-        # Query for events newer than last_seq
-        conn = mirror._ensure_open()
-        cursor = conn.execute(
+    while time.monotonic() < deadline:
+        transport = getattr(request, "transport", None)
+        if transport is None or transport.is_closing():
+            return
+
+        await mirror_single_run(current_app, ref)
+
+        event_rows = await fetch_rows(
+            current_app,
             """
             SELECT seq, type, actor, payload_json, ts
             FROM events
             WHERE run_id = ? AND seq > ?
             ORDER BY seq
             """,
-            (run_id, last_seq)
+            (run_id, last_seq),
         )
-        new_events = cursor.fetchall()
 
-        # Send new events to client
-        for row in new_events:
-            event_data = {
-                "seq": row[0],
-                "type": row[1],
-                "actor": row[2],
-                "payload_json": row[3],
-                "ts": row[4]
-            }
-            # Send as a datastar fragment
-            fragment = f'<div data-seq="{row[0]}">{row[1]} by {row[2]}</div>'
-            yield SSE.patch_elements(fragment)
+        for row in event_rows:
+            try:
+                payload = stdlib_json.loads(row[3]) if row[3] else {}
+            except ValueError:
+                payload = {}
+            delivered = await send_frame(
+                "run-event",
+                {
+                    "seq": row[0],
+                    "type": row[1],
+                    "actor": row[2],
+                    "ts": row[4],
+                    "payload": payload,
+                },
+            )
+            if not delivered:
+                return
             last_seq = max(last_seq, row[0])
 
-        # Check if run is complete
-        run_cursor = conn.execute(
+        status_rows = await fetch_rows(
+            current_app,
             "SELECT status FROM runs WHERE run_id = ?",
-            (run_id,)
+            (run_id,),
         )
-        run_row = run_cursor.fetchone()
+        status = effective_status(current_app, run_id, status_rows[0][0] if status_rows else None)
 
-        # Terminate if run is complete and no new events
-        if run_row and run_row[0] in ("completed", "errored") and not new_events:
-            break
+        if status in TERMINAL_RUN_STATUSES and not event_rows:
+            await send_frame("run-complete", {"status": status})
+            await response.eof()
+            return
 
-        # Wait ~2 seconds before next poll
-        await asyncio.sleep(2)
+        await asyncio.sleep(STREAM_POLL_INTERVAL_SECONDS)
 
-@app.get("/api/runs/<run_id:str>/findings")
+    await send_frame("run-complete", {"status": "stream-timeout"})
+    await response.eof()
+
+
+@app.get("/api/runs/<run_id:runid>/findings")
 async def get_run_findings(request, run_id: str):
     """Return findings for a specific run"""
-    mirror: SqliteMirror = request.app.ctx.mirror
-    conn = mirror._ensure_open()
-
-    cursor = conn.execute(
+    rows = await fetch_rows(
+        request.app,
         """
         SELECT seq, worker, topic, summary
         FROM findings
         WHERE run_id = ?
         ORDER BY seq
         """,
-        (run_id,)
+        (run_id,),
     )
     findings = [
-        {
-            "seq": row[0],
-            "worker": row[1],
-            "topic": row[2],
-            "summary": row[3]
-        }
-        for row in cursor.fetchall()
+        {"seq": row[0], "worker": row[1], "topic": row[2], "summary": row[3]}
+        for row in rows
     ]
-
     return sanic_json(findings)
+
 
 @app.get("/api/ping")
 @datastar_response
 async def ping(request):
-     """grab sse for datastar"""
-     fragment = '<div>Hello! Welcome to the D A T A S T A R </div>'
-     yield SSE.patch_elements(fragment)
+    """grab sse for datastar"""
+    fragment = '<div>Hello! Welcome to the D A T A S T A R </div>'
+    yield SSE.patch_elements(fragment)
+
+
+def prepare_run_directory(run_dir: Path) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "transcripts").mkdir(exist_ok=True)
+    gitignore_path = run_dir.parent.parent / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text("*\n", encoding="utf-8")
+
 
 @app.post("/api/runs")
 async def launch_mission(request):
@@ -260,243 +490,208 @@ async def launch_mission(request):
     }
     """
     try:
-        body = request.json
-        slug = body.get("slug", "unnamed-mission")
-        target_repo = body.get("target_repo")
+        body = request.json or {}
+        slug, slug_error = validate_slug(body.get("slug"))
+        if slug_error:
+            return sanic_json({"error": slug_error}, status=400)
+
+        target_repo, repo_error = validate_target_repo(body.get("target_repo"))
+        if repo_error:
+            return sanic_json({"error": repo_error}, status=400)
+
         agent_data = body.get("agents", [])
+        if not agent_data:
+            return sanic_json({"error": "No agents provided"}, status=400)
+
         synthesis = body.get("synthesis")
         max_turns = body.get("max_turns", 30)
         max_concurrency = body.get("max_concurrency", 4)
 
-        if not target_repo:
-            return sanic_json({"error": "target_repo is required"}, status=400)
+        agents = [
+            AgentSpec(
+                name=spec["name"],
+                brief=spec["brief"],
+                tools=tuple(spec.get("tools", READ_TOOLS)),
+            )
+            for spec in agent_data
+        ]
 
-        target_repo_path = Path(target_repo)
-        if not target_repo_path.exists() or not target_repo_path.is_dir():
-            return sanic_json({"error": f"target_repo does not exist or is not a directory: {target_repo}"}, status=400)
+        run_dir = (target_repo / ".agentgraph" / "runs" / slug).resolve()
+        if not run_dir.is_relative_to(target_repo):
+            return sanic_json({"error": "resolved run directory escapes target_repo"}, status=400)
 
-        if not agent_data:
-            return sanic_json({"error": "No agents provided"}, status=400)
-
-        # Convert agent data to AgentSpec instances
-        agents = []
-        for a in agent_data:
-            tools = tuple(a.get("tools", READ_TOOLS))
-            agents.append(AgentSpec(
-                name=a["name"],
-                brief=a["brief"],
-                tools=tools
-            ))
-
-        # Setup run directory in target repo
-        run_dir = target_repo_path / ".agentgraph" / "runs" / slug
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "transcripts").mkdir(exist_ok=True)
         log_path = run_dir / "run.jsonl"
+        if log_path.exists():
+            return sanic_json(
+                {
+                    "error": f"A run already exists for slug '{slug}' in this repo. "
+                             "Use /resume or a new slug.",
+                    "run_id": compose_run_id(slug, target_repo),
+                },
+                status=409,
+            )
 
-        # Create .gitignore in target_repo/.agentgraph/ if it doesn't exist
-        gitignore_path = target_repo_path / ".agentgraph" / ".gitignore"
-        if not gitignore_path.exists():
-            gitignore_path.write_text("*\n")
+        if active_mission_count(request.app) >= MAX_CONCURRENT_MISSIONS:
+            return sanic_json(
+                {"error": f"Too many missions running (max {MAX_CONCURRENT_MISSIONS})"},
+                status=409,
+            )
 
-        # Track this target_repo in known_repos.json
-        known_repos_path = Path(".agentgraph/known_repos.json")
-        known_repos_path.parent.mkdir(parents=True, exist_ok=True)
-        if known_repos_path.exists():
-            known_repos = stdlib_json.loads(known_repos_path.read_text())
-        else:
-            known_repos = []
+        await asyncio.to_thread(prepare_run_directory, run_dir)
+        await asyncio.to_thread(remember_repo, target_repo)
 
-        target_repo_str = str(target_repo_path.resolve())
-        if target_repo_str not in known_repos:
-            known_repos.append(target_repo_str)
-            known_repos_path.write_text(stdlib_json.dumps(known_repos, indent=2))
+        # Mission.name stays the slug (the JSONL run_id derives from it); the
+        # app-level run_id below is the repo-qualified composite.
+        run_id = compose_run_id(slug, target_repo)
 
-        run_id = f"MISSION-{slug}"
-
-        # Create mission with target_repo as cwd and claim_root
         mission = Mission(
             slug,
             agents,
             synthesis=synthesis,
-            cwd=str(target_repo_path),
-            claim_root=str(target_repo_path),
-            model="claude-sonnet-4-5-20250929",
+            cwd=str(target_repo),
+            claim_root=str(target_repo),
+            model=DEFAULT_MISSION_MODEL,
             max_turns=max_turns,
             max_concurrency=max_concurrency,
             transcript_dir=str(run_dir / "transcripts"),
         )
 
-        # Run mission in background thread
-        # The mission will poll for interrupt.signal file — see interrupt endpoint below
-        def run_mission_thread():
-            try:
-                # Check for interrupt signal file periodically
-                # Mission.run doesn't directly support this, so we use interrupt_after=None
-                # and the mission's host will check for the sentinel file
-                # For this wave, we'll run without interrupt checking in the mission itself
-                # and rely on the thread being tracked so we can check status
-                mission.run(str(log_path))
-            except Exception as e:
-                print(f"Mission {run_id} errored: {e}")
-
-        thread = threading.Thread(target=run_mission_thread, daemon=True)
-        thread.start()
-
-        # Track the running mission
-        request.app.ctx.mission_processes[run_id] = {
-            "thread": thread,
+        stop_event = threading.Event()
+        entry = {
+            "thread": None,
             "slug": slug,
-            "log_path": log_path
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "stop_event": stop_event,
+            "target_repo": str(target_repo),
+            "status": "running",
         }
 
-        return sanic_json({
-            "run_id": run_id,
-            "slug": slug,
-            "status": "launched",
-            "log_path": str(log_path),
-            "target_repo": target_repo_str
-        })
+        def run_mission_thread():
+            try:
+                mission.run(str(log_path), stop_when=stop_event.is_set)
+            except Exception as error:
+                print(f"Mission {run_id} errored: {error}")
+            finally:
+                entry["status"] = "finished"
 
-    except Exception as e:
-        return sanic_json({"error": str(e)}, status=500)
+        thread = threading.Thread(target=run_mission_thread, name=f"mission-{run_id}")
+        entry["thread"] = thread
+        request.app.ctx.mission_processes[run_id] = entry
+        thread.start()
 
-@app.post("/api/runs/<run_id:str>/interrupt")
+        return sanic_json(
+            {
+                "run_id": run_id,
+                "slug": slug,
+                "status": "launched",
+                "log_path": str(log_path),
+                "target_repo": str(target_repo),
+            }
+        )
+
+    except Exception as error:
+        return sanic_json({"error": str(error)}, status=500)
+
+
+@app.post("/api/runs/<run_id:runid>/interrupt")
 async def interrupt_mission(request, run_id: str):
     """
-    Signal a running mission to interrupt after current wave completes.
+    Signal a running mission to stop after its in-flight agent completions.
 
-    Uses a sentinel file that the mission process polls for. The mission
-    must be one that this app launched (tracked in app.ctx.mission_processes).
-
-    Sentinel file contract: Write .agentgraph/runs/<slug>/interrupt.signal
-    to request interrupt. The running mission process (if it supports polling)
-    will check for this file and gracefully stop after current agent completions.
-
-    Note: This implementation writes the sentinel file, but the actual polling
-    mechanism needs to be implemented in the mission execution logic in a future
-    iteration. For now, this marks the intent and creates the file.
+    Sets the mission's stop_event (polled by the runtime via stop_when) and
+    writes run_dir/interrupt.signal as a durable marker of the request.
     """
     try:
-        process_info = request.app.ctx.mission_processes.get(run_id)
+        reap_mission_threads(request.app)
+        entry = request.app.ctx.mission_processes.get(run_id)
 
-        if not process_info:
-            return sanic_json({
-                "error": "Mission not found or not launched by this server"
-            }, status=404)
+        if not entry:
+            return sanic_json(
+                {"error": "Mission not found or not launched by this server"},
+                status=404,
+            )
 
-        # Check if thread is still running
-        if not process_info["thread"].is_alive():
-            return sanic_json({
-                "error": "Mission has already completed",
-                "status": "completed"
-            }, status=400)
+        if not entry["thread"].is_alive():
+            return sanic_json(
+                {"error": "Mission thread is no longer alive", "status": entry["status"]},
+                status=409,
+            )
 
-        # Write interrupt sentinel file
-        slug = process_info["slug"]
-        sentinel_path = Path(".agentgraph/runs") / slug / "interrupt.signal"
-        sentinel_path.write_text(f"Interrupt requested at {Path.cwd()}\n")
+        entry["stop_event"].set()
+        signal_path = Path(entry["run_dir"]) / "interrupt.signal"
+        await asyncio.to_thread(
+            signal_path.write_text,
+            f"interrupt requested at {time.time()}\n",
+            "utf-8",
+        )
 
-        return sanic_json({
-            "run_id": run_id,
-            "status": "interrupt_signaled",
-            "message": "Interrupt signal written. Mission will stop after current wave.",
-            "sentinel_file": str(sentinel_path)
-        })
+        return sanic_json(
+            {"run_id": run_id, "will_stop_after": "current agent completions"},
+            status=202,
+        )
 
-    except Exception as e:
-        return sanic_json({"error": str(e)}, status=500)
+    except Exception as error:
+        return sanic_json({"error": str(error)}, status=500)
 
-@app.post("/api/runs/<run_id:str>/resume")
+
+@app.post("/api/runs/<run_id:runid>/resume")
 async def resume_mission(request, run_id: str):
     """
     Resume an interrupted or completed mission with optionally-amended agent briefs.
 
     Request body (JSON):
     {
-        "agent_edits": [
-            {"name": "agent1", "brief": "Updated brief", "tools": ["Read", "Write"]}
-        ]
+        "original_agents": [{"name": "agent1", "brief": "...", "tools": [...]}],
+        "agent_edits": [{"name": "agent1", "brief": "Updated brief"}]
     }
-
-    Loads the original run's log, merges in the edited agent specs (by name),
-    and launches a new mission run in a background thread with the amended specs.
-    Unspecified fields (brief, tools) keep their original values.
     """
     try:
-        body = request.json
+        body = request.json or {}
         agent_edits = body.get("agent_edits", [])
 
-        # Find the original log file across all repos
-        repos_to_scan = [Path.cwd()]
-        known_repos_path = Path(".agentgraph/known_repos.json")
-        if known_repos_path.exists():
-            known_repos = stdlib_json.loads(known_repos_path.read_text())
-            repos_to_scan.extend([Path(repo) for repo in known_repos])
-
-        original_log = None
-        slug = None
-        original_target_repo = None
-
-        for repo_path in repos_to_scan:
-            runs_dir = repo_path / ".agentgraph" / "runs"
-            if not runs_dir.exists():
-                continue
-            for candidate in runs_dir.rglob("run.jsonl"):
-                relative_path = candidate.relative_to(runs_dir)
-                candidate_run_id = f"MISSION-{relative_path.parent.name}"
-                if candidate_run_id == run_id:
-                    original_log = candidate
-                    slug = relative_path.parent.name
-                    original_target_repo = str(repo_path.resolve())
-                    break
-            if original_log:
-                break
-
-        if not original_log or not original_log.exists():
+        ref = await asyncio.to_thread(find_run, request.app, run_id)
+        if ref is None or not ref.log_path.exists():
             return sanic_json({"error": "Original run log not found"}, status=404)
 
-        # Read original events to extract agent specs
-        # For this implementation, we'll need to reconstruct the AgentSpecs
-        # from the mission.started event or from UI-provided data
-        # Simplified: accept full agent list in request and merge edits
-
         if "original_agents" not in body:
-            return sanic_json({
-                "error": "original_agents required in request body for resume"
-            }, status=400)
+            return sanic_json(
+                {"error": "original_agents required in request body for resume"},
+                status=400,
+            )
 
-        original_agents_data = body["original_agents"]
-
-        # Build edit map
         edit_map = {edit["name"]: edit for edit in agent_edits}
-
-        # Merge edits into original specs
         merged_agents = []
-        for orig in original_agents_data:
-            name = orig["name"]
-            if name in edit_map:
-                # Apply edits
-                brief = edit_map[name].get("brief", orig.get("brief"))
-                tools = tuple(edit_map[name].get("tools", orig.get("tools", READ_TOOLS)))
-            else:
-                brief = orig["brief"]
-                tools = tuple(orig.get("tools", READ_TOOLS))
-
+        for original in body["original_agents"]:
+            name = original["name"]
+            edit = edit_map.get(name, {})
+            brief = edit.get("brief", original.get("brief"))
+            tools = tuple(edit.get("tools", original.get("tools", READ_TOOLS)))
             merged_agents.append(AgentSpec(name=name, brief=brief, tools=tools))
 
-        # Create new run directory for resumed mission in the same target repo
-        target_repo_path = Path(original_target_repo)
-        runs_dir_for_resume = target_repo_path / ".agentgraph" / "runs"
-        resume_slug = f"{slug}-resume-{len(list(runs_dir_for_resume.glob(f'{slug}-resume-*'))) + 1}"
-        resume_dir = runs_dir_for_resume / resume_slug
-        resume_dir.mkdir(parents=True, exist_ok=True)
-        (resume_dir / "transcripts").mkdir(exist_ok=True)
+        target_repo = ref.target_repo
+        resume_suffix = f"-resume-{int(time.time())}"
+        resume_slug = f"{ref.slug[: 64 - len(resume_suffix)]}{resume_suffix}"
+        resume_slug, slug_error = validate_slug(resume_slug)
+        if slug_error:
+            return sanic_json({"error": f"generated resume slug rejected: {slug_error}"}, status=400)
+
+        resume_dir = (target_repo / ".agentgraph" / "runs" / resume_slug).resolve()
         new_log_path = resume_dir / "run.jsonl"
+        if new_log_path.exists():
+            return sanic_json(
+                {"error": f"A resume run already exists for slug '{resume_slug}'"},
+                status=409,
+            )
 
-        resume_run_id = f"MISSION-{resume_slug}"
+        if active_mission_count(request.app) >= MAX_CONCURRENT_MISSIONS:
+            return sanic_json(
+                {"error": f"Too many missions running (max {MAX_CONCURRENT_MISSIONS})"},
+                status=409,
+            )
 
-        # Create mission and resume with original target_repo
+        await asyncio.to_thread(prepare_run_directory, resume_dir)
+
         synthesis = body.get("synthesis")
         max_turns = body.get("max_turns", 30)
         max_concurrency = body.get("max_concurrency", 4)
@@ -505,48 +700,66 @@ async def resume_mission(request, run_id: str):
             resume_slug,
             merged_agents,
             synthesis=synthesis,
-            cwd=str(target_repo_path),
-            claim_root=str(target_repo_path),
-            model="claude-sonnet-4-5-20250929",
+            cwd=str(target_repo),
+            claim_root=str(target_repo),
+            model=DEFAULT_MISSION_MODEL,
             max_turns=max_turns,
             max_concurrency=max_concurrency,
             transcript_dir=str(resume_dir / "transcripts"),
         )
 
-        # Run resume in background thread
-        def resume_mission_thread():
-            try:
-                mission.resume(str(original_log), str(new_log_path))
-            except Exception as e:
-                print(f"Mission resume {resume_run_id} errored: {e}")
+        resume_run_id = compose_run_id(resume_slug, target_repo)
+        original_log_path = ref.log_path
 
-        thread = threading.Thread(target=resume_mission_thread, daemon=True)
-        thread.start()
-
-        # Track the resumed mission
-        request.app.ctx.mission_processes[resume_run_id] = {
-            "thread": thread,
+        stop_event = threading.Event()
+        entry = {
+            "thread": None,
             "slug": resume_slug,
-            "log_path": new_log_path
+            "run_dir": resume_dir,
+            "log_path": new_log_path,
+            "stop_event": stop_event,
+            "target_repo": str(target_repo),
+            "status": "running",
         }
 
-        return sanic_json({
-            "run_id": resume_run_id,
-            "slug": resume_slug,
-            "status": "resumed",
-            "log_path": str(new_log_path),
-            "original_run": run_id,
-            "target_repo": original_target_repo
-        })
+        def resume_mission_thread():
+            try:
+                mission.resume(
+                    str(original_log_path),
+                    str(new_log_path),
+                    stop_when=stop_event.is_set,
+                )
+            except Exception as error:
+                print(f"Mission resume {resume_run_id} errored: {error}")
+            finally:
+                entry["status"] = "finished"
 
-    except Exception as e:
-        return sanic_json({"error": str(e)}, status=500)
+        thread = threading.Thread(target=resume_mission_thread, name=f"mission-{resume_run_id}")
+        entry["thread"] = thread
+        request.app.ctx.mission_processes[resume_run_id] = entry
+        thread.start()
+
+        return sanic_json(
+            {
+                "run_id": resume_run_id,
+                "slug": resume_slug,
+                "status": "resumed",
+                "log_path": str(new_log_path),
+                "original_run": run_id,
+                "target_repo": str(target_repo),
+            }
+        )
+
+    except Exception as error:
+        return sanic_json({"error": str(error)}, status=500)
+
 
 # Cross-run query endpoints
 @app.get("/query")
 async def query_page(request):
     """Serves the cross-run query UI"""
     return html(render_template("query.html"))
+
 
 @app.get("/api/query/findings")
 async def query_findings(request):
@@ -558,27 +771,8 @@ async def query_findings(request):
     - worker: exact worker name
     - run_id: exact run_id
     """
-    mirror: SqliteMirror = request.app.ctx.mirror
+    await mirror_all_runs(request.app)
 
-    # First, ensure all runs are mirrored from all known repos
-    repos_to_scan = [Path.cwd()]
-    known_repos_path = Path(".agentgraph/known_repos.json")
-    if known_repos_path.exists():
-        known_repos = stdlib_json.loads(known_repos_path.read_text())
-        repos_to_scan.extend([Path(repo) for repo in known_repos])
-
-    for repo_path in repos_to_scan:
-        runs_dir = repo_path / ".agentgraph" / "runs"
-        if not runs_dir.exists():
-            continue
-        for run_jsonl in runs_dir.rglob("run.jsonl"):
-            relative_path = run_jsonl.relative_to(runs_dir)
-            run_id = f"MISSION-{relative_path.parent.name}"
-            target_repo_str = str(repo_path.resolve())
-            mirror.mirror_log_file(run_id, run_jsonl, target_repo_str)
-
-    # Build query with optional filters
-    conn = mirror._ensure_open()
     query = """
         SELECT f.run_id, f.seq, f.worker, f.topic, f.summary, r.slug
         FROM findings f
@@ -604,7 +798,7 @@ async def query_findings(request):
 
     query += " ORDER BY f.run_id, f.seq"
 
-    cursor = conn.execute(query, params)
+    rows = await fetch_rows(request.app, query, tuple(params))
     findings = [
         {
             "run_id": row[0],
@@ -612,12 +806,12 @@ async def query_findings(request):
             "worker": row[2],
             "topic": row[3],
             "summary": row[4],
-            "slug": row[5]
+            "slug": row[5],
         }
-        for row in cursor.fetchall()
+        for row in rows
     ]
-
     return sanic_json(findings)
+
 
 @app.get("/api/query/costs")
 async def query_costs(request):
@@ -625,66 +819,49 @@ async def query_costs(request):
     Aggregate cost and turn data across all runs.
     Returns costs grouped by run and by agent, sorted descending by cost.
     """
-    mirror: SqliteMirror = request.app.ctx.mirror
+    await mirror_all_runs(request.app)
 
-    # Ensure all runs are mirrored from all known repos
-    repos_to_scan = [Path.cwd()]
-    known_repos_path = Path(".agentgraph/known_repos.json")
-    if known_repos_path.exists():
-        known_repos = stdlib_json.loads(known_repos_path.read_text())
-        repos_to_scan.extend([Path(repo) for repo in known_repos])
-
-    for repo_path in repos_to_scan:
-        runs_dir = repo_path / ".agentgraph" / "runs"
-        if not runs_dir.exists():
-            continue
-        for run_jsonl in runs_dir.rglob("run.jsonl"):
-            relative_path = run_jsonl.relative_to(runs_dir)
-            run_id = f"MISSION-{relative_path.parent.name}"
-            target_repo_str = str(repo_path.resolve())
-            mirror.mirror_log_file(run_id, run_jsonl, target_repo_str)
-
-    conn = mirror._ensure_open()
-
-    # Aggregate by run
-    run_cursor = conn.execute("""
+    run_rows = await fetch_rows(
+        request.app,
+        """
         SELECT a.run_id, r.slug, SUM(a.cost_usd) as total_cost, SUM(a.turns) as total_turns
         FROM agents a
         LEFT JOIN runs r ON a.run_id = r.run_id
         GROUP BY a.run_id, r.slug
         ORDER BY total_cost DESC
-    """)
+        """,
+    )
     by_run = [
         {
             "run_id": row[0],
             "slug": row[1],
             "total_cost_usd": row[2],
-            "total_turns": row[3]
+            "total_turns": row[3],
         }
-        for row in run_cursor.fetchall()
+        for row in run_rows
     ]
 
-    # Aggregate by agent name across all runs
-    agent_cursor = conn.execute("""
+    agent_rows = await fetch_rows(
+        request.app,
+        """
         SELECT a.name, SUM(a.cost_usd) as total_cost, SUM(a.turns) as total_turns, COUNT(*) as run_count
         FROM agents a
         GROUP BY a.name
         ORDER BY total_cost DESC
-    """)
+        """,
+    )
     by_agent = [
         {
             "agent_name": row[0],
             "total_cost_usd": row[1],
             "total_turns": row[2],
-            "run_count": row[3]
+            "run_count": row[3],
         }
-        for row in agent_cursor.fetchall()
+        for row in agent_rows
     ]
 
-    return sanic_json({
-        "by_run": by_run,
-        "by_agent": by_agent
-    })
+    return sanic_json({"by_run": by_run, "by_agent": by_agent})
+
 
 @app.get("/api/query/claims/conflicts")
 async def query_claim_conflicts(request):
@@ -692,35 +869,18 @@ async def query_claim_conflicts(request):
     Return all claim conflicts (rejected or violated) across all runs.
     Shows partition-overlap mistakes for review.
     """
-    mirror: SqliteMirror = request.app.ctx.mirror
+    await mirror_all_runs(request.app)
 
-    # Ensure all runs are mirrored from all known repos
-    repos_to_scan = [Path.cwd()]
-    known_repos_path = Path(".agentgraph/known_repos.json")
-    if known_repos_path.exists():
-        known_repos = stdlib_json.loads(known_repos_path.read_text())
-        repos_to_scan.extend([Path(repo) for repo in known_repos])
-
-    for repo_path in repos_to_scan:
-        runs_dir = repo_path / ".agentgraph" / "runs"
-        if not runs_dir.exists():
-            continue
-        for run_jsonl in runs_dir.rglob("run.jsonl"):
-            relative_path = run_jsonl.relative_to(runs_dir)
-            run_id = f"MISSION-{relative_path.parent.name}"
-            target_repo_str = str(repo_path.resolve())
-            mirror.mirror_log_file(run_id, run_jsonl, target_repo_str)
-
-    conn = mirror._ensure_open()
-
-    cursor = conn.execute("""
+    rows = await fetch_rows(
+        request.app,
+        """
         SELECT c.run_id, r.slug, c.path, c.owner, c.status, c.seq
         FROM claims c
         LEFT JOIN runs r ON c.run_id = r.run_id
         WHERE c.status IN ('rejected', 'violated')
         ORDER BY c.run_id, c.seq
-    """)
-
+        """,
+    )
     conflicts = [
         {
             "run_id": row[0],
@@ -728,12 +888,17 @@ async def query_claim_conflicts(request):
             "path": row[2],
             "owner": row[3],
             "status": row[4],
-            "seq": row[5]
+            "seq": row[5],
         }
-        for row in cursor.fetchall()
+        for row in rows
     ]
-
     return sanic_json(conflicts)
 
+
 if __name__ == "__main__":
-     app.run(host="0.0.0.0", port=8000, dev=False, single_process=True)
+    app.run(
+        host="127.0.0.1",
+        port=int(os.environ.get("CONDUCTION_PORT", "8000")),
+        dev=False,
+        single_process=True,
+    )

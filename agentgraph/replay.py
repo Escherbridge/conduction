@@ -35,6 +35,7 @@ from agentgraph.events import (
     CLAIM_REJECTED,
     CLAIM_RELEASED,
     CLAIM_VIOLATED,
+    COMMAND_VIOLATED,
     FINDING_RECORDED,
 )
 
@@ -42,6 +43,13 @@ from agentgraph.events import (
 #: injecting a result, or a worker writing through `WorkerAPI`. Everything else
 #: in a log was emitted by the runtime or by a behavior during a quantum, and
 #: so re-occurs on its own when the same events are drained.
+#
+# The rule for adding a type here: emitted between quanta by a hook or by the
+# host → injected, so it must be served from the recording or every later
+# window shifts and `ReplayOrderStall` fires. Produced by behavior or mission
+# code → not injected, because replay re-runs that code and would emit it twice.
+# `command.violated` is the first kind (a `PreToolUse` hook, exactly like
+# `claim.violated`); `mission.completed` is the second.
 INJECTED_TYPES = frozenset(
     {
         AGENT_RESPONDED,
@@ -50,6 +58,7 @@ INJECTED_TYPES = frozenset(
         CLAIM_REJECTED,
         CLAIM_RELEASED,
         CLAIM_VIOLATED,
+        COMMAND_VIOLATED,
     }
 )
 

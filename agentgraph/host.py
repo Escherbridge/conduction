@@ -45,7 +45,13 @@ from typing import Any, Callable, Optional
 from activegraph import Event, Graph, Runtime
 
 from agentgraph.agentcache import AgentCache
-from agentgraph.claims import ClaimLedger, ClaimViolation, make_claim_hook
+from agentgraph.claims import (
+    ClaimLedger,
+    ClaimViolation,
+    CommandViolation,
+    claim_rejection_reason,
+    make_claim_hook,
+)
 from agentgraph.context import GraphContext
 from agentgraph.dispatcher import (
     AgentRequest,
@@ -62,6 +68,7 @@ from agentgraph.events import (
     CLAIM_REJECTED,
     CLAIM_RELEASED,
     CLAIM_VIOLATED,
+    COMMAND_VIOLATED,
     WORKER_EMITTABLE,
     emit,
 )
@@ -114,6 +121,8 @@ class HostResult:
     idle: bool = False
     stopped_reason: str = ""
     violations: list[ClaimViolation] = field(default_factory=list)
+    #: Shell commands refused by the destructive-command policy.
+    command_violations: list[CommandViolation] = field(default_factory=list)
 
 
 @dataclass
@@ -470,10 +479,48 @@ class Host:
         body["worker"] = worker
         return emit(self.graph, type_, body, actor=worker, caused_by=request_event.id)
 
+    @staticmethod
+    def _declared_owns(request_event: Event) -> list[str]:
+        """The `owns` partition the requesting agent was dispatched with."""
+        meta = request_event.payload.get("meta") or {}
+        owns = meta.get("owns") if isinstance(meta, dict) else None
+        if isinstance(owns, str):
+            owns = [owns]
+        return [o for o in (owns or []) if isinstance(o, str) and o.strip()]
+
+    def _invalid_claims(
+        self, paths: list[str], request_event: Event
+    ) -> list[dict[str, str]]:
+        """`(path, reason)` for every path that may not be claimed at all."""
+        owns = self._declared_owns(request_event)
+        out: list[dict[str, str]] = []
+        for path in paths:
+            reason = claim_rejection_reason(
+                path, root=self.ledger.root, owns=owns or None
+            )
+            if reason is not None:
+                out.append({"path": path, "reason": reason})
+        return out
+
     def worker_claim(
         self, worker: str, paths: list[str], request_event: Event
     ) -> dict[str, Any]:
         """Adjudicate a claim. Runs on the host loop, so it is race-free."""
+        invalid = self._invalid_claims(paths, request_event)
+        if invalid:
+            emit(
+                self.graph,
+                CLAIM_REJECTED,
+                {
+                    "worker": worker,
+                    "paths": list(paths),
+                    "conflicts": [],
+                    "invalid": invalid,
+                },
+                actor=worker,
+                caused_by=request_event.id,
+            )
+            return {"granted": False, "conflicts": [], "invalid": invalid}
         conflicts = self.ledger.conflicts(worker, paths)
         if conflicts:
             detail = [{"path": p, "owner": o} for p, o in conflicts]
@@ -524,12 +571,33 @@ class Host:
             caused_by=request_event.id,
         )
 
+    def record_command_violation(
+        self, violation: CommandViolation, request_event: Event
+    ) -> None:
+        """A refused command is a fact, so it goes on the graph."""
+        self._result.command_violations.append(violation)
+        emit(
+            self.graph,
+            COMMAND_VIOLATED,
+            {
+                "worker": violation.worker,
+                "tool_name": violation.tool_name,
+                "command": violation.command,
+                "pattern": violation.pattern,
+            },
+            actor="host",
+            caused_by=request_event.id,
+        )
+
     def claim_hook_for(self, worker: str, request_event: Event) -> Any:
         """The `PreToolUse` hook for one worker, wired to record violations."""
         return make_claim_hook(
             worker,
             self.ledger,
             on_violation=lambda v: self.record_violation(v, request_event),
+            on_command_violation=lambda v: self.record_command_violation(
+                v, request_event
+            ),
         )
 
     # ---- helpers ----

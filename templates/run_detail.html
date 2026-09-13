@@ -22,13 +22,22 @@
                 <div class="run-info" id="run-info">
                     <div class="run-info-item">
                         <span class="run-info-label">Status</span>
-                        <span class="run-info-value" id="run-status">-</span>
+                        <span class="run-info-value run-status" id="run-status">-</span>
                     </div>
                     <div class="run-info-item">
                         <span class="run-info-label">Started</span>
                         <span class="run-info-value" id="run-started">-</span>
                     </div>
+                    <div class="run-info-item">
+                        <span class="run-info-label">Repo</span>
+                        <span class="run-info-value" id="run-repo">-</span>
+                    </div>
+                    <div class="run-info-item" id="connection-badge-item" style="display: none;">
+                        <span class="run-info-label">Connection</span>
+                        <span class="run-info-value connection-badge" id="connection-badge">Disconnected — retrying</span>
+                    </div>
                 </div>
+                <div class="mission-completion-pill" id="mission-completion-pill" style="display: none;"></div>
 
                 <!-- Mission Steering Controls -->
                 <div class="mission-controls" style="margin: 1.5rem 0; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;">
@@ -73,9 +82,13 @@
                                 <span style="display: inline-block; width: 12px; height: 12px; background: #e74c3c; border-radius: 50%; margin-right: 4px;"></span>
                                 Claim Rejected
                             </span>
-                            <span style="display: inline-block;">
+                            <span style="display: inline-block; margin-right: 1rem;">
                                 <span style="display: inline-block; width: 12px; height: 12px; background: #f39c12; border-radius: 50%; margin-right: 4px;"></span>
                                 Finding
+                            </span>
+                            <span style="display: inline-block;">
+                                <span style="display: inline-block; width: 10px; height: 10px; background: #d35400; margin-right: 4px; transform: rotate(45deg);"></span>
+                                Blocked Command
                             </span>
                         </div>
                     </div>
@@ -91,15 +104,40 @@
     </div>
 
     <script>
-        const RUN_ID = window.location.pathname.split('/').pop();
+        const RUN_ID = decodeURIComponent(window.location.pathname.split('/').pop());
         const agentEvents = {}; // Store events by agent name
         const agentData = {}; // Store agent metadata
         let eventTimeRange = { min: Infinity, max: -Infinity };
         let findings = [];
+        let targetRepo = null;
+        let runStatus = null;
+        let missionEventSource = null;
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[character]));
+        }
+
+        function repoBasename(fullPath) {
+            if (!fullPath) {
+                return null;
+            }
+            const normalized = fullPath.replace(/\\/g, '/');
+            const segments = normalized.split('/').filter(Boolean);
+            return segments.length ? segments[segments.length - 1] : fullPath;
+        }
 
         // Initialize on page load
         window.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('run-title').textContent = RUN_ID;
+
+            // Fetch run status/started_at from the runs list (stable endpoint)
+            await fetchRunMeta();
 
             // Fetch agents
             await fetchAgents();
@@ -107,19 +145,42 @@
             // Fetch findings
             await fetchFindings();
 
-            // Set up SSE for live events
+            // Set up SSE for live events (single data path, no polling fallback)
             setupEventStream();
 
             // Set up mission controls
             setupMissionControls();
         });
 
+        async function fetchRunMeta() {
+            try {
+                const response = await fetch('/api/runs');
+                const runs = await response.json();
+                const currentRun = Array.isArray(runs) ? runs.find(run => run.run_id === RUN_ID) : null;
+
+                if (currentRun) {
+                    runStatus = currentRun.status || 'running';
+                    document.getElementById('run-started').textContent = currentRun.started_at
+                        ? new Date(currentRun.started_at).toLocaleString()
+                        : '-';
+                    renderStatusPill(runStatus);
+                }
+
+                checkRunStatus();
+            } catch (error) {
+                console.error('Error fetching run metadata:', error);
+            }
+        }
+
         async function fetchAgents() {
             try {
-                const response = await fetch(`/api/runs/${RUN_ID}/agents`);
-                const agents = await response.json();
+                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/agents`);
+                const { agents, target_repo: fetchedTargetRepo } = await response.json();
 
-                agents.forEach(agent => {
+                targetRepo = fetchedTargetRepo || null;
+                renderTargetRepo();
+
+                (agents || []).forEach(agent => {
                     agentData[agent.name] = agent;
                     agentEvents[agent.name] = [];
                 });
@@ -130,9 +191,22 @@
             }
         }
 
+        function renderTargetRepo() {
+            const repoSpan = document.getElementById('run-repo');
+            const basename = repoBasename(targetRepo);
+
+            if (basename) {
+                repoSpan.textContent = basename;
+                repoSpan.title = targetRepo;
+            } else {
+                repoSpan.textContent = '-';
+                repoSpan.removeAttribute('title');
+            }
+        }
+
         async function fetchFindings() {
             try {
-                const response = await fetch(`/api/runs/${RUN_ID}/findings`);
+                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/findings`);
                 findings = await response.json();
                 renderFindings();
             } catch (error) {
@@ -141,65 +215,147 @@
         }
 
         function setupEventStream() {
-            const eventSource = new EventSource(`/api/runs/${RUN_ID}/events`);
+            missionEventSource = new EventSource(`/api/runs/${encodeURIComponent(RUN_ID)}/events`);
 
-            // Listen for all SSE messages to parse event data
-            eventSource.onmessage = (e) => {
-                try {
-                    // Parse datastar fragment to extract event data
-                    // Format: <div data-seq="{seq}">{type} by {actor}</div>
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(e.data, 'text/html');
-                    const eventDiv = doc.querySelector('div[data-seq]');
+            missionEventSource.addEventListener('run-event', handleRunEvent);
+            missionEventSource.addEventListener('run-complete', handleRunComplete);
 
-                    if (eventDiv) {
-                        const seq = parseInt(eventDiv.getAttribute('data-seq'));
-                        const text = eventDiv.textContent.trim();
-                        const match = text.match(/^(.+?)\s+by\s+(.+)$/);
-
-                        if (match) {
-                            const type = match[1];
-                            const actor = match[2];
-                            const ts = Date.now(); // Approximate timestamp
-
-                            // Initialize agent events array if needed
-                            if (!agentEvents[actor]) {
-                                agentEvents[actor] = [];
-                            }
-
-                            // Avoid duplicates based on seq
-                            if (!agentEvents[actor].find(ev => ev.seq === seq)) {
-                                agentEvents[actor].push({ seq, type, actor, ts });
-
-                                // Update time range
-                                eventTimeRange.min = Math.min(eventTimeRange.min, ts);
-                                eventTimeRange.max = Math.max(eventTimeRange.max, ts);
-
-                                // Re-render timelines
-                                renderSwimLanes();
-                            }
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error processing SSE message:', error);
-                }
+            missionEventSource.onopen = () => {
+                hideConnectionBadge();
             };
 
-            eventSource.onerror = (error) => {
-                console.error('SSE connection error:', error);
+            // EventSource retries automatically; only surface status, no manual retry loop
+            missionEventSource.onerror = () => {
+                showConnectionBadge();
             };
-
-            // Also poll for findings updates
-            pollUpdates();
         }
 
-        async function pollUpdates() {
-            // Poll for findings and agent status updates
-            setInterval(async () => {
-                await fetchFindings();
-                await fetchAgents();
-                renderSwimLanes();
-            }, 3000);
+        function showConnectionBadge() {
+            document.getElementById('connection-badge-item').style.display = 'flex';
+        }
+
+        function hideConnectionBadge() {
+            document.getElementById('connection-badge-item').style.display = 'none';
+        }
+
+        function handleRunEvent(e) {
+            const ev = JSON.parse(e.data);
+
+            // mission.completed is run-scoped, not agent-scoped: show the
+            // completion pill only, do not create a swim lane for it.
+            if (ev.type === 'mission.completed') {
+                renderMissionCompletionPill(ev.payload || {});
+                return;
+            }
+
+            const actor = ev.actor || 'unknown';
+
+            if (!agentEvents[actor]) {
+                agentEvents[actor] = [];
+            }
+            if (!agentData[actor]) {
+                agentData[actor] = { name: actor, status: 'unknown', turns: 0, cost_usd: 0 };
+            }
+
+            const alreadySeen = agentEvents[actor].some(existingEvent => existingEvent.seq === ev.seq);
+            if (alreadySeen) {
+                return;
+            }
+
+            agentEvents[actor].push(ev);
+            applyAgentEventToAgentData(ev);
+
+            const eventTime = Date.parse(ev.ts);
+            const resolvedTime = Number.isNaN(eventTime) ? Date.now() : eventTime;
+            eventTimeRange.min = Math.min(eventTimeRange.min, resolvedTime);
+            eventTimeRange.max = Math.max(eventTimeRange.max, resolvedTime);
+
+            if (ev.type === 'finding.recorded') {
+                recordFindingFromEvent(ev);
+            }
+
+            renderSwimLanes();
+        }
+
+        function applyAgentEventToAgentData(ev) {
+            const actor = ev.actor;
+            const payload = ev.payload || {};
+
+            if (!actor || !agentData[actor]) {
+                return;
+            }
+
+            if (ev.type === 'agent.requested') {
+                agentData[actor].status = 'requested';
+                const identity = payload.identity || {};
+                if (identity.model) {
+                    agentData[actor].model = identity.model;
+                }
+            } else if (ev.type === 'agent.responded') {
+                agentData[actor].status = payload.error ? 'error' : 'completed';
+                agentData[actor].cost_usd = Number(payload.cost_usd) || agentData[actor].cost_usd || 0;
+                agentData[actor].turns = payload.num_turns || agentData[actor].turns || 0;
+                agentData[actor].error = payload.error;
+            }
+        }
+
+        function recordFindingFromEvent(ev) {
+            const payload = ev.payload || {};
+            // Assumption: sqlite_sink.py ingest_event reads finding.recorded payload as
+            // flat {worker, topic, summary} (see agentgraph/sqlite_sink.py ~198-208).
+            // Fall back to a nested object.data shape defensively in case the wire
+            // format differs from the mirror's own read path.
+            const summary = payload.summary
+                || (payload.object && payload.object.data && payload.object.data.summary)
+                || '';
+            const alreadyRecorded = findings.some(finding => finding.seq === ev.seq);
+
+            if (alreadyRecorded) {
+                return;
+            }
+
+            findings.push({
+                seq: ev.seq,
+                worker: payload.worker || ev.actor,
+                topic: payload.topic || '',
+                summary
+            });
+
+            renderFindings();
+        }
+
+        function handleRunComplete(e) {
+            const { status } = JSON.parse(e.data);
+            runStatus = status || 'completed';
+            renderStatusPill(runStatus);
+            checkRunStatus();
+            hideConnectionBadge();
+
+            if (missionEventSource) {
+                missionEventSource.close();
+            }
+        }
+
+        function renderStatusPill(status) {
+            const statusSpan = document.getElementById('run-status');
+            statusSpan.textContent = status;
+            statusSpan.className = `run-info-value run-status ${escapeHtml(status)}`;
+        }
+
+        function renderMissionCompletionPill(payload) {
+            const pill = document.getElementById('mission-completion-pill');
+            const status = payload.status || 'completed';
+            const statusClass = status === 'failed' ? 'failed' : 'completed';
+            const agentsFailed = payload.agents_failed;
+            const gatePassed = payload.gate_passed;
+
+            pill.style.display = 'block';
+            pill.className = `mission-completion-pill ${statusClass}`;
+            pill.innerHTML = `
+                <span class="mission-completion-status">${escapeHtml(status)}</span>
+                ${agentsFailed !== undefined ? `<span class="mission-completion-detail">agents failed: ${escapeHtml(agentsFailed)}</span>` : ''}
+                ${gatePassed !== undefined ? `<span class="mission-completion-detail">gate passed: ${escapeHtml(gatePassed)}</span>` : ''}
+            `;
         }
 
         function renderSwimLanes() {
@@ -216,15 +372,15 @@
                 return `
                     <div class="swimlane">
                         <div class="swimlane-header">
-                            <span class="swimlane-title">${name}</span>
+                            <span class="swimlane-title">${escapeHtml(name)}</span>
                             <div class="swimlane-meta">
                                 <div class="swimlane-meta-item">
                                     <span class="swimlane-meta-label">Status</span>
-                                    <span class="swimlane-meta-value">${agent.status || 'unknown'}</span>
+                                    <span class="swimlane-meta-value">${escapeHtml(agent.status || 'unknown')}</span>
                                 </div>
                                 <div class="swimlane-meta-item">
                                     <span class="swimlane-meta-label">Model</span>
-                                    <span class="swimlane-meta-value">${agent.model || '-'}</span>
+                                    <span class="swimlane-meta-value">${escapeHtml(agent.model || '-')}</span>
                                 </div>
                                 <div class="swimlane-meta-item">
                                     <span class="swimlane-meta-label">Turns</span>
@@ -249,6 +405,36 @@
             }).join('');
         }
 
+        function timelineEventClass(ev) {
+            const baseClass = ev.type.toLowerCase().replace(/\./g, '-');
+            const payload = ev.payload || {};
+
+            if (ev.type === 'agent.responded' && payload.error) {
+                return `${baseClass} agent-responded-error`;
+            }
+            return baseClass;
+        }
+
+        function timelineEventDetail(ev) {
+            const payload = ev.payload || {};
+
+            if (ev.type === 'finding.recorded') {
+                const summary = payload.summary
+                    || (payload.object && payload.object.data && payload.object.data.summary)
+                    || '';
+                return summary ? `<br/>${escapeHtml(summary)}` : '';
+            }
+            if (ev.type === 'command.violated') {
+                const command = payload.command || payload.reason || '';
+                return command ? `<br/>${escapeHtml(command)}` : '';
+            }
+            if (ev.type === 'agent.responded' && payload.error) {
+                const errorText = typeof payload.error === 'string' ? payload.error : JSON.stringify(payload.error);
+                return `<br/>${escapeHtml(errorText)}`;
+            }
+            return '';
+        }
+
         function renderTimelineEvents(events) {
             if (events.length === 0) {
                 return '<div style="text-align: center; color: #999; font-size: 0.85rem; padding: 0.5rem;">No events yet</div>';
@@ -258,14 +444,18 @@
             const range = eventTimeRange.max - eventTimeRange.min || 1;
 
             return events.map(event => {
-                const position = ((event.ts - eventTimeRange.min) / range) * 100;
-                const eventClass = event.type.toLowerCase().replace('.', '-');
+                const eventTime = Date.parse(event.ts);
+                const resolvedTime = Number.isNaN(eventTime) ? eventTimeRange.min : eventTime;
+                const position = ((resolvedTime - eventTimeRange.min) / range) * 100;
+                const eventClass = timelineEventClass(event);
+                const typeLabel = escapeHtml(event.type);
+                const timeLabel = escapeHtml(new Date(resolvedTime).toLocaleTimeString());
 
                 return `
                     <div class="timeline-event ${eventClass}"
                          style="left: ${position}%"
-                         title="${event.type} at ${new Date(event.ts).toLocaleTimeString()}">
-                        <div class="event-tooltip">${event.type}<br/>${new Date(event.ts).toLocaleTimeString()}</div>
+                         title="${typeLabel} at ${timeLabel}">
+                        <div class="event-tooltip">${typeLabel}<br/>${timeLabel}${timelineEventDetail(event)}</div>
                     </div>
                 `;
             }).join('');
@@ -283,9 +473,9 @@
                     ${agentFindings.map(f => `
                         <div class="finding-item">
                             <div class="finding-header">
-                                <span class="finding-topic">${f.topic}</span>
+                                <span class="finding-topic">${escapeHtml(f.topic)}</span>
                             </div>
-                            <div class="finding-summary">${f.summary}</div>
+                            <div class="finding-summary">${escapeHtml(f.summary)}</div>
                         </div>
                     `).join('')}
                 </div>
@@ -303,10 +493,10 @@
             container.innerHTML = findings.map(f => `
                 <div class="finding-item">
                     <div class="finding-header">
-                        <span class="finding-topic">${f.topic}</span>
-                        <span class="finding-worker">by ${f.worker}</span>
+                        <span class="finding-topic">${escapeHtml(f.topic)}</span>
+                        <span class="finding-worker">by ${escapeHtml(f.worker)}</span>
                     </div>
-                    <div class="finding-summary">${f.summary}</div>
+                    <div class="finding-summary">${escapeHtml(f.summary)}</div>
                 </div>
             `).join('');
         }
@@ -322,7 +512,7 @@
                 interruptStatus.textContent = 'Sending interrupt signal...';
 
                 try {
-                    const response = await fetch(`/api/runs/${RUN_ID}/interrupt`, {
+                    const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/interrupt`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' }
                     });
@@ -380,7 +570,7 @@
                 }));
 
                 try {
-                    const response = await fetch(`/api/runs/${RUN_ID}/resume`, {
+                    const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/resume`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -397,7 +587,7 @@
                         resumeStatus.textContent = `✓ Resumed as ${data.run_id}`;
                         resumeStatus.style.color = '#50c878';
                         setTimeout(() => {
-                            window.location.href = `/runs/${data.run_id}`;
+                            window.location.href = `/runs/${encodeURIComponent(data.run_id)}`;
                         }, 1500);
                     } else {
                         resumeStatus.textContent = `✗ ${data.error || 'Failed'}`;
@@ -412,27 +602,11 @@
             });
         }
 
-        async function checkRunStatus() {
-            // Poll run status from the mirror
-            const statusSpan = document.getElementById('run-status');
+        function checkRunStatus() {
+            // Authoritative source is the runs-list status field and the
+            // run-complete SSE event; interrupt control is only shown while running.
             const interruptControl = document.getElementById('interrupt-control');
-
-            // Simple check: if any agent status is 'running', show interrupt button
-            const hasRunning = Object.values(agentData).some(a => a.status === 'running');
-
-            if (hasRunning) {
-                statusSpan.textContent = 'running';
-                interruptControl.style.display = 'block';
-            } else {
-                const statuses = Object.values(agentData).map(a => a.status);
-                if (statuses.every(s => s === 'completed')) {
-                    statusSpan.textContent = 'completed';
-                } else if (statuses.some(s => s === 'errored')) {
-                    statusSpan.textContent = 'errored';
-                } else {
-                    statusSpan.textContent = 'unknown';
-                }
-            }
+            interruptControl.style.display = runStatus === 'running' ? 'block' : 'none';
         }
 
         function renderAgentBriefEditors() {
@@ -450,13 +624,13 @@
                 return `
                     <div style="margin-bottom: 1rem;">
                         <label style="display: block; font-weight: bold; margin-bottom: 0.25rem;">
-                            ${name}
+                            ${escapeHtml(name)}
                         </label>
                         <textarea
-                            id="brief-${name}"
+                            id="brief-${escapeHtml(name)}"
                             rows="3"
                             style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 0.9rem;"
-                        >${agent.originalBrief}</textarea>
+                        >${escapeHtml(agent.originalBrief)}</textarea>
                     </div>
                 `;
             }).join('');

@@ -1,0 +1,19 @@
+# Dev/test dependencies for conduction's vendored agentgraph package.
+#
+# The conduction venv (venv/) does NOT have pytest installed as of the last
+# check. Either:
+#
+#   1. Install into the conduction venv:
+#        venv\Scripts\python -m pip install -r requirements-dev.txt
+#      (venv currently lacks `pip` itself in some setups on this machine's
+#      original agentgraph .venv — if `pip` is missing, use `python -m
+#      ensurepip` first, or use option 2 below.)
+#
+#   2. Or run the suite with the ORIGINAL agentgraph repo's venv, which
+#      already has pytest and a matching `activegraph` version installed,
+#      pointed at this repo via tests/conftest.py's sys.path insertion:
+#        C:\Users\atooz\Programming\Projects\agentgraph\.venv\Scripts\python -m pytest
+#      run from the conduction repo root (see README/report for the exact
+#      command).
+#
+pytest>=8.0

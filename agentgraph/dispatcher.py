@@ -19,7 +19,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Protocol
 
 from agentgraph.agentcache import AgentCache, hash_agent_call
 
@@ -29,6 +29,46 @@ if TYPE_CHECKING:
 #: Agent calls run for minutes; the framework's `Tool` default of 30s is a
 #: tool's timeout, not an agent's (plan section 3.4).
 DEFAULT_TIMEOUT_SECONDS = 600.0
+
+#: Stamped into every identity hash. Bump it whenever host-side policy that the
+#: identity dict cannot see changes — hook sets, tool binding, permission rules.
+#: A log recorded under the old policy then fails replay loud instead of
+#: "passing" under a policy that never ran.
+CONFIG_FINGERPRINT = "v2-hardened"
+
+#: Every built-in Claude Code tool this host knows how to deny.
+#: `allowed_tools` is only an auto-approve list: under `bypassPermissions` an
+#: unlisted built-in is still reachable, which is how a read-only worker once
+#: ran `Stop-Process`. `denied_tools()` turns a tool set into a boundary by
+#: naming the complement. MCP tools (`mcp__*`) are deliberately absent — graph
+#: access is granted by `mcp_server_names`, and denying an unknown server's
+#: tools by name is not something this list can do correctly.
+CLAUDE_TOOL_NAMES = frozenset(
+    {
+        "Bash",
+        "BashOutput",
+        "KillShell",
+        "PowerShell",
+        "Read",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "Glob",
+        "Grep",
+        "WebFetch",
+        "WebSearch",
+        "Task",
+        "TodoWrite",
+        "Agent",
+        "Skill",
+    }
+)
+
+
+def denied_tools(allowed: Iterable[str]) -> tuple[str, ...]:
+    """The complement of `allowed` over the known built-in tool names, sorted."""
+    return tuple(sorted(CLAUDE_TOOL_NAMES - set(allowed)))
 
 
 @dataclass(frozen=True)
@@ -56,7 +96,7 @@ class AgentRequest:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     #: Caller-supplied marker for anything else that changes behavior (hook
     #: sets, for instance, which are callables and so cannot be hashed).
-    config_fingerprint: str = ""
+    config_fingerprint: str = CONFIG_FINGERPRINT
     #: Not hashed: routing/labelling metadata for the log.
     meta: dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -307,6 +347,7 @@ class ClaudeAgentWorker:
                         "errors": list(result.errors or []),
                     },
                     text_parts,
+                    result.structured_output,
                 ),
                 latency_seconds=latency,
                 cost_usd=Decimal(str(result.total_cost_usd or 0)),
@@ -331,17 +372,22 @@ class ClaudeAgentWorker:
         return response
 
 
-def _with_partial(error: dict, text_parts: list) -> dict:
-    """Attach whatever final text the worker produced before it was cut off.
+def _with_partial(error: dict, text_parts: list, structured: Any = None) -> dict:
+    """Attach whatever the worker produced before it was cut off — text, and the
+    typed result if the SDK still carried one.
 
     A worker that exhausted its turn cap has been paid for; dropping its
     partial answer discards purchased work. The partial lands in the error
     payload -- recorded, replayed, and rendered -- so a cut-off completion is
-    always inspectable afterwards.
+    always inspectable afterwards. `structured` is kept separately because a
+    turn-capped run can still carry a typed result, and flattening it into text
+    is what made turn-cap exhaustion cost the whole wave.
     """
     partial = "".join(text_parts).strip()
     if partial:
         error["partial_output"] = partial
+    if structured is not None:
+        error["partial_result"] = structured
     return error
 
 
@@ -522,6 +568,8 @@ class ReplayCacheMiss(RuntimeError):
 
 
 __all__ = [
+    "CLAUDE_TOOL_NAMES",
+    "CONFIG_FINGERPRINT",
     "DEFAULT_TIMEOUT_SECONDS",
     "AgentRequest",
     "AgentResponse",
@@ -531,4 +579,5 @@ __all__ = [
     "ReplayCacheMiss",
     "ScriptedWorker",
     "Worker",
+    "denied_tools",
 ]

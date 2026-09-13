@@ -24,8 +24,32 @@ CLAIM_REJECTED = "claim.rejected"
 CLAIM_RELEASED = "claim.released"
 CLAIM_VIOLATED = "claim.violated"
 
+# --- command policy ---
+#: A refused shell command. Payload: worker, tool_name, command, pattern.
+COMMAND_VIOLATED = "command.violated"
+
+# --- mission lifecycle ---
+#: One mission run finished. Payload: agents_total, agents_failed, gate_passed,
+#: status. Emitted by mission code, never by a worker.
+MISSION_COMPLETED = "mission.completed"
+
 #: Types a worker is allowed to put on the graph through `graph_emit`.
 WORKER_EMITTABLE = frozenset({FINDING_RECORDED})
+
+#: Every type this module defines, for registries and log validators.
+AGENTGRAPH_EVENT_TYPES = frozenset(
+    {
+        AGENT_REQUESTED,
+        AGENT_RESPONDED,
+        FINDING_RECORDED,
+        CLAIM_GRANTED,
+        CLAIM_REJECTED,
+        CLAIM_RELEASED,
+        CLAIM_VIOLATED,
+        COMMAND_VIOLATED,
+        MISSION_COMPLETED,
+    }
+)
 
 
 def emit(
@@ -64,3 +88,19 @@ def emit(
             timestamp=graph.clock.now(),
         )
     )
+
+
+__all__ = [
+    "AGENTGRAPH_EVENT_TYPES",
+    "AGENT_REQUESTED",
+    "AGENT_RESPONDED",
+    "CLAIM_GRANTED",
+    "CLAIM_REJECTED",
+    "CLAIM_RELEASED",
+    "CLAIM_VIOLATED",
+    "COMMAND_VIOLATED",
+    "FINDING_RECORDED",
+    "MISSION_COMPLETED",
+    "WORKER_EMITTABLE",
+    "emit",
+]

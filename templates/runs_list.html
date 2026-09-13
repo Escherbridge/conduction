@@ -25,6 +25,40 @@
     </div>
 
     <script>
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[character]));
+        }
+
+        function repoBasename(fullPath) {
+            if (!fullPath) {
+                return null;
+            }
+            const normalized = fullPath.replace(/\\/g, '/');
+            const segments = normalized.split('/').filter(Boolean);
+            return segments.length ? segments[segments.length - 1] : fullPath;
+        }
+
+        // run_id format is MISSION-<slug>@<8-hex-repo-key>; the repo key suffix
+        // is optional so older runs without it still render correctly.
+        function parseRunId(runId) {
+            const withoutPrefix = runId.startsWith('MISSION-') ? runId.slice('MISSION-'.length) : runId;
+            const atIndex = withoutPrefix.lastIndexOf('@');
+
+            if (atIndex === -1) {
+                return { slugPart: withoutPrefix, repoKey: null };
+            }
+            return {
+                slugPart: withoutPrefix.slice(0, atIndex),
+                repoKey: withoutPrefix.slice(atIndex + 1)
+            };
+        }
+
         // Fetch and render runs on page load
         window.addEventListener('DOMContentLoaded', async () => {
             try {
@@ -33,7 +67,7 @@
 
                 const container = document.getElementById('runs-container');
 
-                if (runs.length === 0) {
+                if (!Array.isArray(runs) || runs.length === 0) {
                     container.innerHTML = `
                         <div class="empty-state">
                             <div class="empty-state-icon">📋</div>
@@ -43,23 +77,35 @@
                     return;
                 }
 
-                container.innerHTML = runs.map(run => `
-                    <div class="run-item">
-                        <div>
-                            <a href="/runs/${run.run_id}">${run.run_id}</a>
-                            ${run.slug ? `<div style="font-size: 0.85rem; color: #666; margin-top: 0.25rem;">${run.slug}</div>` : ''}
+                const sortedRuns = [...runs].sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
+
+                container.innerHTML = sortedRuns.map(run => {
+                    const { slugPart, repoKey } = parseRunId(run.run_id);
+                    const repoName = repoBasename(run.target_repo);
+                    const encodedRunId = encodeURIComponent(run.run_id);
+                    const statusLabel = run.status || 'running';
+
+                    return `
+                        <div class="run-item">
+                            <div>
+                                <a href="/runs/${encodedRunId}">${escapeHtml(slugPart)}</a>
+                                <div class="run-item-badges">
+                                    ${repoName ? `<span class="repo-badge" title="${escapeHtml(run.target_repo)}">${escapeHtml(repoName)}</span>` : ''}
+                                    ${repoKey ? `<span class="repo-key-badge" title="repo key">${escapeHtml(repoKey)}</span>` : ''}
+                                </div>
+                            </div>
+                            <div class="run-meta">
+                                <span>${run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</span>
+                                <span class="run-status ${escapeHtml(statusLabel)}">${escapeHtml(statusLabel)}</span>
+                            </div>
                         </div>
-                        <div class="run-meta">
-                            <span>${new Date(run.started_at).toLocaleString()}</span>
-                            <span class="run-status ${run.status || 'running'}">${run.status || 'running'}</span>
-                        </div>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
             } catch (error) {
                 console.error('Error fetching runs:', error);
                 document.getElementById('runs-container').innerHTML = `
                     <div class="empty-state">
-                        <p>Error loading runs: ${error.message}</p>
+                        <p>Error loading runs: ${escapeHtml(error.message)}</p>
                     </div>
                 `;
             }
