@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 from agentgraph import gates
 from agentgraph.dispatcher import Worker
-from agentgraph.manifest import manifest_from_request, write_mission_manifest
+from agentgraph.manifest import ensure_agentgraph_gitignore, manifest_from_request, write_mission_manifest
 from agentgraph.mission import READ_TOOLS, AgentSpec, Mission
 
 SLUG_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -223,6 +223,7 @@ class FactoryRunner:
     # ---- execution ----
 
     def run(self, *, start_wave: int = 0) -> FactoryRunState:
+        ensure_agentgraph_gitignore(self.target_repo)
         prior = self._load_prior_waves()
         state = FactoryRunState(
             factory_run_id=self.factory_run_id,

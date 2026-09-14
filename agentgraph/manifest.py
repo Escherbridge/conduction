@@ -24,6 +24,18 @@ from agentgraph.mission import READ_TOOLS, AgentSpec, Mission
 MANIFEST_FILENAME = "mission.json"
 SCHEMA_VERSION = 1
 DEFAULT_SDK = "claude"
+# Run artifacts never dirty the host repo, but the factory spec is source and
+# must stay versioned -- hence the negations.
+AGENTGRAPH_GITIGNORE = "*\n!.gitignore\n!factory.json\n"
+
+
+def ensure_agentgraph_gitignore(target_repo: Path) -> Path:
+    """Create `<repo>/.agentgraph/.gitignore`, upgrading a legacy bare `*` in place."""
+    path = Path(target_repo) / ".agentgraph" / ".gitignore"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.read_text(encoding="utf-8").strip() == "*":
+        path.write_text(AGENTGRAPH_GITIGNORE, encoding="utf-8")
+    return path
 
 
 def write_mission_manifest(run_dir: Path, manifest: dict) -> Path:

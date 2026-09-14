@@ -21,6 +21,7 @@ from agentgraph.dispatcher import ScriptedWorker
 from agentgraph.gates import gate_from_spec, validate_gate_spec
 from agentgraph.sdk_workers import resolve_workers, available_sdks
 from agentgraph.manifest import (
+    ensure_agentgraph_gitignore,
     manifest_from_request,
     mission_from_manifest,
     read_mission_manifest,
@@ -649,9 +650,7 @@ async def ping(request):
 def prepare_run_directory(run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "transcripts").mkdir(exist_ok=True)
-    gitignore_path = run_dir.parent.parent / ".gitignore"
-    if not gitignore_path.exists():
-        gitignore_path.write_text("*\n", encoding="utf-8")
+    ensure_agentgraph_gitignore(run_dir.parent.parent.parent)
 
 
 DRY_RUN_AGENT_SECONDS = 1.5

@@ -2,7 +2,6 @@ venv/
 __pycache__/
 *.pyc
 *.db
-.agentgraph/
 node_modules/
 .venv/
 *.pid
