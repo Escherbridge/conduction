@@ -16,6 +16,8 @@ from agentgraph.sqlite_sink import SqliteMirror
 from agentgraph import Mission, AgentSpec
 from agentgraph.mission import EDIT_TOOLS, READ_TOOLS
 from agentgraph.dispatcher import ScriptedWorker
+from agentgraph.gates import gate_from_spec, validate_gate_spec
+from agentgraph.sdk_workers import resolve_workers, available_sdks
 
 APP_ROOT = Path(__file__).resolve().parent
 KNOWN_REPOS_PATH = APP_ROOT / ".agentgraph" / "known_repos.json"
@@ -498,6 +500,77 @@ def create_dry_run_worker(run_dir: Path, agent_names: list[str]):
     return ScriptedWorker(dry_run_responder, delays={name: DRY_RUN_AGENT_SECONDS for name in agent_names})
 
 
+def build_agent_specs(agent_data: list[dict]) -> list[AgentSpec]:
+    """AgentSpec per UI spec dict, carrying the optional `owns` partition."""
+    return [
+        AgentSpec(
+            name=spec["name"],
+            brief=spec["brief"],
+            tools=tuple(spec.get("tools", READ_TOOLS)),
+            owns=tuple(spec.get("owns", ()) or ()),
+            meta={"sdk": spec["sdk"]} if spec.get("sdk") else {},
+        )
+        for spec in agent_data
+    ]
+
+
+def resolve_mission_gate(gate_spec: object, target_repo: Path, agents: list[AgentSpec]):
+    """(gate_callable, error) -- gate presets compiled from the request body."""
+    if gate_spec is None:
+        return None, None
+    if not isinstance(gate_spec, dict):
+        return None, "gate must be an object"
+    errors = validate_gate_spec(gate_spec)
+    if errors:
+        return None, "; ".join(errors)
+    owns = {spec.name: tuple(spec.owns) for spec in agents}
+    return gate_from_spec(gate_spec, cwd=str(target_repo), owns=owns), None
+
+
+def resolve_mission_worker(run_dir: Path, agents: list[AgentSpec]):
+    """(worker, error). CONDUCTION_DRY_RUN=1 wins over any per-agent sdk."""
+    if os.environ.get("CONDUCTION_DRY_RUN") == "1":
+        return create_dry_run_worker(run_dir, [spec.name for spec in agents]), None
+    agent_sdks = {spec.name: spec.meta["sdk"] for spec in agents if spec.meta.get("sdk")}
+    if not agent_sdks:
+        return None, None
+    try:
+        return resolve_workers(agent_sdks), None
+    except ValueError as error:
+        return None, str(error)
+
+
+def validate_agent_sdks(agent_data: list[dict]) -> str | None:
+    """Reject unknown sdk names up front, dry-run or not."""
+    agent_sdks = {
+        spec.get("name"): spec["sdk"] for spec in agent_data if spec.get("sdk")
+    }
+    if not agent_sdks:
+        return None
+    try:
+        resolve_workers(agent_sdks)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+@app.get("/api/sdks")
+async def list_sdks(request):
+    """Which per-agent SDKs this host can actually reach, plus the dry-run flag."""
+    return sanic_json(
+        {
+            "sdks": available_sdks(),
+            "dry_run": os.environ.get("CONDUCTION_DRY_RUN") == "1",
+        }
+    )
+
+
+@app.get("/launch")
+async def launch_page(request):
+    """Serves the mission launch form"""
+    return html(render_template("launch.html"))
+
+
 @app.post("/api/runs")
 async def launch_mission(request):
     """
@@ -534,14 +607,16 @@ async def launch_mission(request):
         max_turns = body.get("max_turns", 30)
         max_concurrency = body.get("max_concurrency", 4)
 
-        agents = [
-            AgentSpec(
-                name=spec["name"],
-                brief=spec["brief"],
-                tools=tuple(spec.get("tools", READ_TOOLS)),
-            )
-            for spec in agent_data
-        ]
+        sdk_error = validate_agent_sdks(agent_data)
+        if sdk_error:
+            return sanic_json({"error": sdk_error}, status=400)
+
+        agents = build_agent_specs(agent_data)
+
+        gate_spec = body.get("gate")
+        gate, gate_error = resolve_mission_gate(gate_spec, target_repo, agents)
+        if gate_error:
+            return sanic_json({"error": gate_error}, status=400)
 
         run_dir = (target_repo / ".agentgraph" / "runs" / slug).resolve()
         if not run_dir.is_relative_to(target_repo):
@@ -581,12 +656,12 @@ async def launch_mission(request):
             max_turns=max_turns,
             max_concurrency=max_concurrency,
             transcript_dir=str(run_dir / "transcripts"),
+            gate=gate,
         )
 
-        worker = (
-            create_dry_run_worker(run_dir, [spec.name for spec in agents])
-            if os.environ.get("CONDUCTION_DRY_RUN") == "1" else None
-        )
+        worker, worker_error = resolve_mission_worker(run_dir, agents)
+        if worker_error:
+            return sanic_json({"error": worker_error}, status=400)
 
         stop_event = threading.Event()
         entry = {
@@ -619,6 +694,7 @@ async def launch_mission(request):
                 "status": "launched",
                 "log_path": str(log_path),
                 "target_repo": str(target_repo),
+                "gate": gate is not None,
             }
         )
 
@@ -693,13 +769,25 @@ async def resume_mission(request, run_id: str):
             )
 
         edit_map = {edit["name"]: edit for edit in agent_edits}
-        merged_agents = []
+        merged_specs = []
         for original in body["original_agents"]:
             name = original["name"]
             edit = edit_map.get(name, {})
-            brief = edit.get("brief", original.get("brief"))
-            tools = tuple(edit.get("tools", original.get("tools", READ_TOOLS)))
-            merged_agents.append(AgentSpec(name=name, brief=brief, tools=tools))
+            merged = {
+                "name": name,
+                "brief": edit.get("brief", original.get("brief")),
+                "tools": edit.get("tools", original.get("tools", READ_TOOLS)),
+                "owns": edit.get("owns", original.get("owns", ())),
+            }
+            sdk = edit.get("sdk", original.get("sdk"))
+            if sdk:
+                merged["sdk"] = sdk
+            merged_specs.append(merged)
+
+        sdk_error = validate_agent_sdks(merged_specs)
+        if sdk_error:
+            return sanic_json({"error": sdk_error}, status=400)
+        merged_agents = build_agent_specs(merged_specs)
 
         target_repo = ref.target_repo
         resume_suffix = f"-resume-{int(time.time())}"
@@ -728,6 +816,10 @@ async def resume_mission(request, run_id: str):
         max_turns = body.get("max_turns", 30)
         max_concurrency = body.get("max_concurrency", 4)
 
+        gate, gate_error = resolve_mission_gate(body.get("gate"), target_repo, merged_agents)
+        if gate_error:
+            return sanic_json({"error": gate_error}, status=400)
+
         mission = Mission(
             resume_slug,
             merged_agents,
@@ -738,12 +830,12 @@ async def resume_mission(request, run_id: str):
             max_turns=max_turns,
             max_concurrency=max_concurrency,
             transcript_dir=str(resume_dir / "transcripts"),
+            gate=gate,
         )
 
-        worker = (
-            create_dry_run_worker(resume_dir, [spec.name for spec in merged_agents])
-            if os.environ.get("CONDUCTION_DRY_RUN") == "1" else None
-        )
+        worker, worker_error = resolve_mission_worker(resume_dir, merged_agents)
+        if worker_error:
+            return sanic_json({"error": worker_error}, status=400)
 
         resume_run_id = compose_run_id(resume_slug, target_repo)
         original_log_path = ref.log_path
@@ -785,6 +877,7 @@ async def resume_mission(request, run_id: str):
                 "log_path": str(new_log_path),
                 "original_run": run_id,
                 "target_repo": str(target_repo),
+                "gate": gate is not None,
             }
         )
 

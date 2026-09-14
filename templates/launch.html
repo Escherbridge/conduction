@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Launch Mission - Conduction</title>
+    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div id="app-root">
+        <header>
+            <h1>Conduction</h1>
+            <p>Launch Multi-Agent Mission</p>
+            <nav>
+                <a href="/">Home</a>
+                <a href="/runs">Runs</a>
+            </nav>
+        </header>
+        <main id="main-content">
+            <div class="launch-container">
+                <div class="launch-header">
+                    <h2>Launch Mission</h2>
+                    <div id="dry-run-badge" style="display: none;" class="dry-run-badge">
+                        🧪 Dry-run mode
+                    </div>
+                </div>
+
+                <form id="launch-form">
+                    <!-- Mission Configuration -->
+                    <div class="form-section">
+                        <h3>Mission Configuration</h3>
+
+                        <div class="form-group">
+                            <label for="target_repo">Target Repository</label>
+                            <input type="text" id="target_repo" name="target_repo" required
+                                   placeholder="/path/to/repo" class="form-input">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="slug">Mission Slug</label>
+                            <input type="text" id="slug" name="slug" required
+                                   placeholder="fix-auth-bug" class="form-input">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="synthesis">Synthesis Brief (optional)</label>
+                            <textarea id="synthesis" name="synthesis" rows="3" class="form-input"
+                                      placeholder="Final synthesis task after agents complete..."></textarea>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="max_turns">Max Turns per Agent</label>
+                                <input type="number" id="max_turns" name="max_turns" value="35" min="1" max="200" class="form-input">
+                            </div>
+                            <div class="form-group">
+                                <label for="max_concurrency">Max Concurrency</label>
+                                <input type="number" id="max_concurrency" name="max_concurrency" value="4" min="1" max="16" class="form-input">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Agents -->
+                    <div class="form-section">
+                        <div class="section-header">
+                            <h3>Agents</h3>
+                            <button type="button" id="load-example-btn" class="btn-secondary">
+                                Load Example
+                            </button>
+                        </div>
+
+                        <div id="agents-container"></div>
+
+                        <button type="button" id="add-agent-btn" class="btn-secondary">
+                            + Add Agent
+                        </button>
+                    </div>
+
+                    <!-- Gate Configuration -->
+                    <div class="form-section">
+                        <h3>Gate Checks (optional)</h3>
+
+                        <div class="gate-presets">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="gate-pytest" name="gate-pytest">
+                                <span>Run pytest</span>
+                            </label>
+
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="gate-owns" name="gate-owns">
+                                <span>Verify ownership (all changed files must be under agent owns)</span>
+                            </label>
+                        </div>
+
+                        <div class="form-group" style="margin-top: 1rem;">
+                            <label for="gate-probe-routes">Probe Routes (optional, comma-separated)</label>
+                            <input type="text" id="gate-probe-routes" name="gate-probe-routes"
+                                   placeholder="/, /health, /api/status" class="form-input">
+                            <small style="color: #666; font-size: 0.85rem;">
+                                If provided, will start the app and verify these routes return 200
+                            </small>
+                        </div>
+                    </div>
+
+                    <!-- Submit -->
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">
+                            Launch Mission
+                        </button>
+                        <span id="launch-status" class="launch-status"></span>
+                    </div>
+
+                    <div id="error-display" class="error-display" style="display: none;"></div>
+                </form>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let agentCounter = 0;
+        let availableSdks = {};
+        let isDryRun = false;
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[character]));
+        }
+
+        const TOOL_OPTIONS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Fetch available SDKs
+            await fetchSdks();
+
+            // Add initial agent row
+            addAgentRow();
+
+            // Set up event listeners
+            document.getElementById('add-agent-btn').addEventListener('click', addAgentRow);
+            document.getElementById('load-example-btn').addEventListener('click', loadExample);
+            document.getElementById('launch-form').addEventListener('submit', handleSubmit);
+        });
+
+        async function fetchSdks() {
+            try {
+                const response = await fetch('/api/sdks');
+                const data = await response.json();
+                availableSdks = data.sdks || {};
+                isDryRun = data.dry_run || false;
+
+                if (isDryRun) {
+                    document.getElementById('dry-run-badge').style.display = 'inline-block';
+                }
+            } catch (error) {
+                console.error('Error fetching SDKs:', error);
+                availableSdks = { claude: true };
+            }
+        }
+
+        function addAgentRow(name = '', brief = '', tools = ['Read', 'Grep', 'Glob', 'Edit', 'Write'], sdk = 'claude', owns = '') {
+            const container = document.getElementById('agents-container');
+            const agentId = agentCounter++;
+
+            const agentRow = document.createElement('div');
+            agentRow.className = 'agent-row';
+            agentRow.dataset.agentId = agentId;
+
+            agentRow.innerHTML = `
+                <div class="agent-row-header">
+                    <h4>Agent ${agentId + 1}</h4>
+                    <button type="button" class="btn-remove" data-agent-id="${agentId}">Remove</button>
+                </div>
+
+                <div class="form-group">
+                    <label for="agent-name-${agentId}">Name</label>
+                    <input type="text" id="agent-name-${agentId}" class="agent-name form-input" required
+                           placeholder="gates-module" value="${escapeHtml(name)}">
+                </div>
+
+                <div class="form-group">
+                    <label for="agent-brief-${agentId}">Brief</label>
+                    <textarea id="agent-brief-${agentId}" class="agent-brief form-input" rows="4" required
+                              placeholder="Implement gate_from_spec() and validate_gate_spec()...">${escapeHtml(brief)}</textarea>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="agent-tools-${agentId}">Tools</label>
+                        <select id="agent-tools-${agentId}" class="agent-tools form-input" multiple size="6">
+                            ${TOOL_OPTIONS.map(tool =>
+                                `<option value="${escapeHtml(tool)}" ${tools.includes(tool) ? 'selected' : ''}>${escapeHtml(tool)}</option>`
+                            ).join('')}
+                        </select>
+                        <small style="color: #666; font-size: 0.85rem;">Hold Ctrl/Cmd to select multiple</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="agent-sdk-${agentId}">SDK</label>
+                        <select id="agent-sdk-${agentId}" class="agent-sdk form-input">
+                            ${Object.entries(availableSdks).map(([sdkName, isAvailable]) =>
+                                `<option value="${escapeHtml(sdkName)}" ${!isAvailable ? 'disabled' : ''} ${sdkName === sdk ? 'selected' : ''}>
+                                    ${escapeHtml(sdkName)}${!isAvailable ? ' (unavailable)' : ''}
+                                </option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="agent-owns-${agentId}">Owns (comma-separated paths)</label>
+                    <input type="text" id="agent-owns-${agentId}" class="agent-owns form-input"
+                           placeholder="agentgraph/gates.py, tests/test_gates.py" value="${escapeHtml(owns)}">
+                </div>
+            `;
+
+            container.appendChild(agentRow);
+
+            // Set up remove button
+            agentRow.querySelector('.btn-remove').addEventListener('click', (e) => {
+                const targetId = e.target.dataset.agentId;
+                const targetRow = document.querySelector(`[data-agent-id="${targetId}"]`);
+                if (targetRow) {
+                    targetRow.remove();
+                }
+            });
+        }
+
+        function loadExample() {
+            // Clear existing agents
+            document.getElementById('agents-container').innerHTML = '';
+            agentCounter = 0;
+
+            // Set mission config
+            document.getElementById('target_repo').value = '/path/to/project';
+            document.getElementById('slug').value = 'example-mission';
+            document.getElementById('synthesis').value = '';
+            document.getElementById('max_turns').value = '35';
+            document.getElementById('max_concurrency').value = '4';
+
+            // Add two example agents with disjoint owns
+            addAgentRow(
+                'alpha',
+                'Implement the core engine. Read the spec, write the implementation, verify it works.',
+                ['Read', 'Grep', 'Glob', 'Edit', 'Write'],
+                'claude',
+                'src/engine.py, src/core/*.py'
+            );
+
+            addAgentRow(
+                'beta',
+                'Write comprehensive tests. Cover edge cases, verify error handling.',
+                ['Read', 'Grep', 'Glob', 'Edit', 'Write'],
+                'claude',
+                'tests/test_engine.py, tests/test_integration.py'
+            );
+
+            // Enable pytest and owns gates
+            document.getElementById('gate-pytest').checked = true;
+            document.getElementById('gate-owns').checked = true;
+            document.getElementById('gate-probe-routes').value = '';
+        }
+
+        async function handleSubmit(e) {
+            e.preventDefault();
+
+            const statusSpan = document.getElementById('launch-status');
+            const errorDisplay = document.getElementById('error-display');
+            const submitBtn = e.target.querySelector('button[type="submit"]');
+
+            statusSpan.textContent = 'Launching...';
+            statusSpan.style.color = '#666';
+            errorDisplay.style.display = 'none';
+            submitBtn.disabled = true;
+
+            try {
+                // Collect mission config
+                const targetRepo = document.getElementById('target_repo').value.trim();
+                const slug = document.getElementById('slug').value.trim();
+                const synthesis = document.getElementById('synthesis').value.trim() || null;
+                const maxTurns = parseInt(document.getElementById('max_turns').value, 10);
+                const maxConcurrency = parseInt(document.getElementById('max_concurrency').value, 10);
+
+                // Collect agents
+                const agents = [];
+                const agentRows = document.querySelectorAll('.agent-row');
+
+                agentRows.forEach(row => {
+                    const agentId = row.dataset.agentId;
+                    const name = document.getElementById(`agent-name-${agentId}`).value.trim();
+                    const brief = document.getElementById(`agent-brief-${agentId}`).value.trim();
+                    const toolsSelect = document.getElementById(`agent-tools-${agentId}`);
+                    const tools = Array.from(toolsSelect.selectedOptions).map(opt => opt.value);
+                    const sdk = document.getElementById(`agent-sdk-${agentId}`).value;
+                    const ownsInput = document.getElementById(`agent-owns-${agentId}`).value.trim();
+                    const owns = ownsInput ? ownsInput.split(',').map(p => p.trim()).filter(Boolean) : null;
+
+                    agents.push({
+                        name,
+                        brief,
+                        tools,
+                        sdk,
+                        ...(owns && owns.length > 0 ? { owns } : {})
+                    });
+                });
+
+                if (agents.length === 0) {
+                    throw new Error('At least one agent is required');
+                }
+
+                // Collect gate config
+                const gate = {};
+                const pytestChecked = document.getElementById('gate-pytest').checked;
+                const ownsChecked = document.getElementById('gate-owns').checked;
+                const probeRoutes = document.getElementById('gate-probe-routes').value.trim();
+
+                if (pytestChecked) {
+                    gate.pytest = true;
+                }
+                if (ownsChecked) {
+                    gate.owns = true;
+                }
+                if (probeRoutes) {
+                    const routes = probeRoutes.split(',').map(r => r.trim()).filter(Boolean);
+                    if (routes.length > 0) {
+                        gate.probe = { routes };
+                    }
+                }
+
+                // Build request payload
+                const payload = {
+                    target_repo: targetRepo,
+                    slug,
+                    synthesis,
+                    max_turns: maxTurns,
+                    max_concurrency: maxConcurrency,
+                    agents,
+                    ...(Object.keys(gate).length > 0 ? { gate } : {})
+                };
+
+                // Submit
+                const response = await fetch('/api/runs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    statusSpan.textContent = `✓ Launched: ${data.run_id}`;
+                    statusSpan.style.color = '#50c878';
+
+                    // Redirect after short delay
+                    setTimeout(() => {
+                        window.location.href = `/runs/${encodeURIComponent(data.run_id)}`;
+                    }, 1000);
+                } else {
+                    // Show error
+                    const errorMessage = data.error || 'Launch failed';
+                    errorDisplay.textContent = errorMessage;
+                    errorDisplay.style.display = 'block';
+                    statusSpan.textContent = '✗ Failed';
+                    statusSpan.style.color = '#e74c3c';
+                    submitBtn.disabled = false;
+                }
+            } catch (error) {
+                errorDisplay.textContent = `Error: ${escapeHtml(error.message)}`;
+                errorDisplay.style.display = 'block';
+                statusSpan.textContent = '✗ Error';
+                statusSpan.style.color = '#e74c3c';
+                submitBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
