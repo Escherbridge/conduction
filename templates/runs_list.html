@@ -1,121 +1,185 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mission Runs - Conduction</title>
-    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
-    <link rel="stylesheet" href="/static/css/styles.css">
-</head>
-<body data-store="{ runs: [], loading: true }">
-    <div id="app-root">
-        <header>
-            <h1>Conduction</h1>
-            <p>Mission Run Monitor</p>
-            <nav>
-                <a href="/">Home</a>
-                <a href="/launch">Launch Mission</a>
-                <a href="/factory">Factory Pipelines</a>
-            </nav>
-        </header>
-        <main id="main-content">
-            <div class="runs-list">
-                <h2>Mission Runs</h2>
-                <div id="runs-container" data-on-load="@get('/api/runs')"></div>
+{% extends "base.html" %}
+
+{% block title %}Runs{% endblock %}
+
+{% block content %}
+<div class="page">
+    <div class="card">
+        <h2 class="card-title">Mission Runs</h2>
+
+        <!-- Filters -->
+        <div class="form-grid" style="margin-bottom: 1.5rem;">
+            <div class="field">
+                <label>Filter by Project</label>
+                <select id="project-filter" class="form-input">
+                    <option value="">All Projects</option>
+                </select>
             </div>
-        </main>
+            <div class="field">
+                <label>Filter by Status</label>
+                <select id="status-filter" class="form-input">
+                    <option value="">All Statuses</option>
+                    <option value="running">Running</option>
+                    <option value="completed">Completed</option>
+                    <option value="failed">Failed</option>
+                    <option value="interrupted">Interrupted</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="runs-container"></div>
     </div>
+</div>
+{% endblock %}
 
-    <script>
-        function escapeHtml(value) {
-            return String(value ?? '').replace(/[&<>"']/g, character => ({
-                '&': '&amp;',
-                '<': '&lt;',
-                '>': '&gt;',
-                '"': '&quot;',
-                "'": '&#39;'
-            }[character]));
+{% block scripts %}
+<script>
+    const { escapeHtml, pill, fmtCost, fmtAgo, encodeId } = window.Conduction;
+
+    function repoBasename(fullPath) {
+        if (!fullPath) return null;
+        const normalized = fullPath.replace(/\\/g, '/');
+        const segments = normalized.split('/').filter(Boolean);
+        return segments.length ? segments[segments.length - 1] : fullPath;
+    }
+
+    function parseRunId(runId) {
+        const withoutPrefix = runId.startsWith('MISSION-') ? runId.slice('MISSION-'.length) : runId;
+        const atIndex = withoutPrefix.lastIndexOf('@');
+        if (atIndex === -1) {
+            return { slugPart: withoutPrefix, repoKey: null };
         }
+        return {
+            slugPart: withoutPrefix.slice(0, atIndex),
+            repoKey: withoutPrefix.slice(atIndex + 1)
+        };
+    }
 
-        function repoBasename(fullPath) {
-            if (!fullPath) {
-                return null;
-            }
-            const normalized = fullPath.replace(/\\/g, '/');
-            const segments = normalized.split('/').filter(Boolean);
-            return segments.length ? segments[segments.length - 1] : fullPath;
-        }
+    let allRuns = [];
+    let filteredRuns = [];
 
-        // run_id format is MISSION-<slug>@<8-hex-repo-key>; the repo key suffix
-        // is optional so older runs without it still render correctly.
-        function parseRunId(runId) {
-            const withoutPrefix = runId.startsWith('MISSION-') ? runId.slice('MISSION-'.length) : runId;
-            const atIndex = withoutPrefix.lastIndexOf('@');
+    async function loadRuns() {
+        try {
+            const runs = await window.Conduction.fetchJson('/api/runs');
+            allRuns = runs;
 
-            if (atIndex === -1) {
-                return { slugPart: withoutPrefix, repoKey: null };
-            }
-            return {
-                slugPart: withoutPrefix.slice(0, atIndex),
-                repoKey: withoutPrefix.slice(atIndex + 1)
-            };
-        }
-
-        // Fetch and render runs on page load
-        window.addEventListener('DOMContentLoaded', async () => {
-            try {
-                const response = await fetch('/api/runs');
-                const runs = await response.json();
-
-                const container = document.getElementById('runs-container');
-
-                if (!Array.isArray(runs) || runs.length === 0) {
-                    container.innerHTML = `
-                        <div class="empty-state">
-                            <div class="empty-state-icon">📋</div>
-                            <p>No mission runs found</p>
-                        </div>
-                    `;
-                    return;
+            // Populate project filter
+            const projects = new Set();
+            runs.forEach(run => {
+                if (run.target_repo) {
+                    projects.add(run.target_repo);
                 }
+            });
 
-                const sortedRuns = [...runs].sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
-
-                container.innerHTML = sortedRuns.map(run => {
-                    const { slugPart, repoKey } = parseRunId(run.run_id);
-                    const repoName = repoBasename(run.target_repo);
-                    const encodedRunId = encodeURIComponent(run.run_id);
-                    const statusLabel = run.status || 'running';
-                    const kind = run.kind || 'legacy';
-                    const parentRunId = run.parent_run_id;
-
-                    return `
-                        <div class="run-item">
-                            <div>
-                                <a href="/runs/${encodedRunId}">${escapeHtml(slugPart)}</a>
-                                <div class="run-item-badges">
-                                    <span class="kind-badge kind-${escapeHtml(kind)}">${escapeHtml(kind)}</span>
-                                    ${repoName ? `<span class="repo-badge" title="${escapeHtml(run.target_repo)}">${escapeHtml(repoName)}</span>` : ''}
-                                    ${repoKey ? `<span class="repo-key-badge" title="repo key">${escapeHtml(repoKey)}</span>` : ''}
-                                </div>
-                                ${kind === 'replay' && parentRunId ? `<div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">$0 replay of <a href="/runs/${encodeURIComponent(parentRunId)}" style="color: #667eea;">${escapeHtml(parentRunId)}</a></div>` : ''}
-                            </div>
-                            <div class="run-meta">
-                                <span>${run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</span>
-                                <span class="run-status ${escapeHtml(statusLabel)}">${escapeHtml(statusLabel)}</span>
-                            </div>
-                        </div>
-                    `;
+            const projectFilter = document.getElementById('project-filter');
+            const currentProject = projectFilter.value;
+            projectFilter.innerHTML = '<option value="">All Projects</option>' +
+                Array.from(projects).sort().map(proj => {
+                    const name = repoBasename(proj);
+                    return `<option value="${escapeHtml(proj)}">${escapeHtml(name)}</option>`;
                 }).join('');
-            } catch (error) {
-                console.error('Error fetching runs:', error);
-                document.getElementById('runs-container').innerHTML = `
-                    <div class="empty-state">
-                        <p>Error loading runs: ${escapeHtml(error.message)}</p>
-                    </div>
-                `;
-            }
+            projectFilter.value = currentProject;
+
+            applyFilters();
+        } catch (error) {
+            console.error('Error fetching runs:', error);
+            document.getElementById('runs-container').innerHTML = `
+                <div class="empty-state">
+                    <p>Error loading runs: ${escapeHtml(error.message)}</p>
+                </div>
+            `;
+        }
+    }
+
+    function applyFilters() {
+        const projectFilter = document.getElementById('project-filter').value;
+        const statusFilter = document.getElementById('status-filter').value;
+
+        filteredRuns = allRuns.filter(run => {
+            if (projectFilter && run.target_repo !== projectFilter) return false;
+            if (statusFilter && run.status !== statusFilter) return false;
+            return true;
         });
-    </script>
-</body>
-</html>
+
+        renderRuns();
+    }
+
+    function renderRuns() {
+        const container = document.getElementById('runs-container');
+
+        if (filteredRuns.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">📋</div>
+                    <p>No mission runs found</p>
+                </div>
+            `;
+            return;
+        }
+
+        const sortedRuns = [...filteredRuns].sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
+
+        container.innerHTML = `
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Run</th>
+                        <th>Project</th>
+                        <th>Status</th>
+                        <th>Gate</th>
+                        <th>Cost</th>
+                        <th>Started</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${sortedRuns.map(run => {
+                        const { slugPart, repoKey } = parseRunId(run.run_id);
+                        const repoName = repoBasename(run.target_repo);
+                        const encodedRunId = encodeId(run.run_id);
+                        const statusLabel = run.status || 'running';
+                        const kind = run.kind || 'legacy';
+                        const parentRunId = run.parent_run_id;
+                        const gatePassed = run.gate_passed;
+                        const costUsd = run.cost_usd || 0;
+
+                        return `
+                            <tr>
+                                <td>
+                                    <a href="/runs/${encodedRunId}">${escapeHtml(slugPart)}</a>
+                                    <div style="margin-top: 0.25rem;">
+                                        <span class="pill pill-${escapeHtml(kind)}">${escapeHtml(kind)}</span>
+                                        ${repoKey ? `<span class="badge mono" title="repo key">${escapeHtml(repoKey)}</span>` : ''}
+                                    </div>
+                                    ${kind === 'replay' && parentRunId ? `<div class="muted" style="font-size: 0.85rem; margin-top: 0.25rem;">replay of <a href="/runs/${encodeId(parentRunId)}">${escapeHtml(parentRunId)}</a></div>` : ''}
+                                </td>
+                                <td>
+                                    ${repoName ? `<span class="badge" title="${escapeHtml(run.target_repo)}">${escapeHtml(repoName)}</span>` : '-'}
+                                </td>
+                                <td>
+                                    ${pill(statusLabel)}
+                                </td>
+                                <td>
+                                    ${gatePassed !== undefined ? (gatePassed ? '<span class="pill pill-passed">passed</span>' : '<span class="pill pill-failed">failed</span>') : '-'}
+                                </td>
+                                <td class="mono">
+                                    ${fmtCost(costUsd)}
+                                </td>
+                                <td class="muted">
+                                    ${run.started_at ? fmtAgo(run.started_at) : '-'}
+                                </td>
+                            </tr>
+                        `;
+                    }).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+        loadRuns();
+
+        document.getElementById('project-filter').addEventListener('change', applyFilters);
+        document.getElementById('status-filter').addEventListener('change', applyFilters);
+    });
+</script>
+{% endblock %}

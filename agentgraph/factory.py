@@ -12,9 +12,9 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
-from agentgraph import gates
+from agentgraph import gates, policy
 from agentgraph.dispatcher import Worker
 from agentgraph.manifest import ensure_agentgraph_gitignore, manifest_from_request, write_mission_manifest
 from agentgraph.mission import READ_TOOLS, AgentSpec, Mission
@@ -185,7 +185,9 @@ class FactoryRunner:
         ] = None,
         model: str = "claude-sonnet-4-5-20250929",
         stop_when: Optional[Callable[[], bool]] = None,
+        rules: Sequence[dict] = (),
     ) -> None:
+        self.rules = list(rules or ())
         self.spec = spec
         self.target_repo = Path(target_repo)
         self.factory_run_id = factory_run_id
@@ -282,6 +284,13 @@ class FactoryRunner:
     def _run_wave(self, wave: FactoryWave, run_dir: Path):
         run_dir.mkdir(parents=True, exist_ok=True)
         specs = [self._agent_spec(agent) for agent in wave.agents]
+        # Binding rules ride in the brief (and on the board) for every wave, so
+        # the manifest and the recorded request show exactly what the agent saw.
+        specs = policy.apply_rules(specs, self.rules)
+        manifest_agents = [
+            {**agent, "brief": spec.brief} for agent, spec in zip(wave.agents, specs)
+        ]
+        facts = [policy.rules_fact(self.rules)] if self.rules else []
         owns = {spec.name: tuple(spec.owns) for spec in specs}
         gate = gates.gate_from_spec(wave.gate, cwd=str(self.target_repo), owns=owns)
 
@@ -290,7 +299,7 @@ class FactoryRunner:
             run_dir,
             manifest_from_request(
                 slug=f"{self.spec.slug}-{wave.slug}",
-                agents=list(wave.agents),
+                agents=manifest_agents,
                 synthesis=wave.synthesis,
                 gate=dict(wave.gate or {}),
                 model=self.model,
@@ -299,6 +308,7 @@ class FactoryRunner:
                 target_repo=str(self.target_repo),
                 kind="factory-wave",
                 parent_run_id=self.factory_run_id,
+                facts=facts,
             ),
         )
 
@@ -317,6 +327,7 @@ class FactoryRunner:
             claim_root=str(self.target_repo),
             max_concurrency=wave.max_concurrency,
             transcript_dir=str(run_dir / "transcripts"),
+            facts=facts,
             gate=gate,
         )
         return mission.run(run_dir / "run.jsonl", worker=worker, stop_when=self.stop_when)

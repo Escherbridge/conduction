@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}Projects{% endblock %}
+
+{% block content %}
+<div class="page">
+    <div class="card">
+        <h2 class="card-title">Registered Projects</h2>
+        <div id="projects-table-container">
+            <div class="empty-state">Loading projects...</div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top: 1.5rem;">
+        <h2 class="card-title">Register New Project</h2>
+        <form id="register-form" class="form-grid">
+            <div class="field">
+                <label for="target-repo">Target Repository Path</label>
+                <input type="text" id="target-repo" name="target_repo" required
+                       placeholder="C:\path\to\repo or /path/to/repo" class="mono">
+            </div>
+            <div class="field">
+                <label for="project-name">Project Name (optional)</label>
+                <input type="text" id="project-name" name="name"
+                       placeholder="Auto-detected from path if empty">
+            </div>
+            <div class="field">
+                <button type="submit" class="btn btn-primary">Register Project</button>
+                <span id="register-status" class="muted"></span>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const { escapeHtml, fetchJson } = window.Conduction;
+
+async function loadProjects() {
+    const container = document.getElementById('projects-table-container');
+    try {
+        const projects = await fetchJson('/api/projects');
+
+        if (projects.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>No projects registered yet</p></div>';
+            return;
+        }
+
+        let html = '<table class="table"><thead><tr>';
+        html += '<th>Name</th>';
+        html += '<th>Repository</th>';
+        html += '<th>Rules</th>';
+        html += '<th>Goals</th>';
+        html += '<th>Schedules</th>';
+        html += '<th>Runs</th>';
+        html += '<th>Last Run</th>';
+        html += '</tr></thead><tbody>';
+
+        projects.forEach(proj => {
+            const repoBasename = proj.target_repo ? proj.target_repo.replace(/\\/g, '/').split('/').filter(Boolean).pop() : '-';
+            const goals = proj.goals || {open: 0, done: 0, blocked: 0};
+            const lastRun = proj.last_run_at ? new Date(proj.last_run_at).toLocaleString() : 'Never';
+
+            html += '<tr>';
+            html += `<td><a href="/projects/${escapeHtml(proj.repo_key)}">${escapeHtml(proj.name)}</a></td>`;
+            html += `<td class="mono" title="${escapeHtml(proj.target_repo)}">${escapeHtml(repoBasename)}</td>`;
+            html += `<td>${proj.rules_count || 0}</td>`;
+            html += `<td><span class="muted">O:</span>${goals.open} <span class="muted">D:</span>${goals.done} <span class="muted">B:</span>${goals.blocked}</td>`;
+            html += `<td>${proj.schedules_count || 0}</td>`;
+            html += `<td>${proj.runs_count || 0}</td>`;
+            html += `<td class="muted">${escapeHtml(lastRun)}</td>`;
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (error) {
+        container.innerHTML = `<div class="empty-state"><p>Error loading projects: ${escapeHtml(error.message)}</p></div>`;
+    }
+}
+
+document.getElementById('register-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const statusEl = document.getElementById('register-status');
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+
+    const formData = {
+        target_repo: document.getElementById('target-repo').value.trim(),
+        name: document.getElementById('project-name').value.trim() || undefined
+    };
+
+    submitBtn.disabled = true;
+    statusEl.textContent = 'Registering...';
+
+    try {
+        await fetchJson('/api/projects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(formData)
+        });
+
+        statusEl.textContent = '✓ Registered';
+        statusEl.style.color = 'var(--ok)';
+        document.getElementById('register-form').reset();
+
+        // Reload table
+        await loadProjects();
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+            statusEl.style.color = '';
+        }, 3000);
+    } catch (error) {
+        statusEl.textContent = `✗ ${error.message}`;
+        statusEl.style.color = 'var(--danger)';
+    } finally {
+        submitBtn.disabled = false;
+    }
+});
+
+// Load on page ready
+loadProjects();
+</script>
+{% endblock %}

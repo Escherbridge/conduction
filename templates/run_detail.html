@@ -1,55 +1,53 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Run Detail - Conduction</title>
-    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
-    <link rel="stylesheet" href="/static/css/styles.css">
-</head>
-<body>
-    <div id="app-root">
-        <header>
-            <h1>Conduction</h1>
-            <p>Mission Run Detail</p>
-            <nav>
-                <a href="/runs">← Back to Runs</a>
-            </nav>
-        </header>
-        <main id="main-content">
-            <div class="run-detail">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem;">
-                    <div>
-                        <h2 id="run-title">Loading...</h2>
-                        <div id="parent-run-link" style="display: none; margin-top: 0.5rem;"></div>
-                    </div>
-                    <div class="action-buttons">
-                        <button id="replay-btn" class="btn-action btn-replay" title="Replay this run for $0">Replay ($0)</button>
-                        <button id="delete-btn" class="btn-action btn-delete" title="Delete this run">Delete</button>
-                    </div>
-                </div>
-                <div class="run-info" id="run-info">
-                    <div class="run-info-item">
-                        <span class="run-info-label">Status</span>
-                        <span class="run-info-value run-status" id="run-status">-</span>
-                    </div>
-                    <div class="run-info-item">
-                        <span class="run-info-label">Kind</span>
-                        <span class="run-info-value kind-badge" id="run-kind">-</span>
-                    </div>
-                    <div class="run-info-item">
-                        <span class="run-info-label">Started</span>
-                        <span class="run-info-value" id="run-started">-</span>
-                    </div>
-                    <div class="run-info-item">
-                        <span class="run-info-label">Repo</span>
-                        <span class="run-info-value" id="run-repo">-</span>
-                    </div>
-                    <div class="run-info-item" id="connection-badge-item" style="display: none;">
-                        <span class="run-info-label">Connection</span>
-                        <span class="run-info-value connection-badge" id="connection-badge">Disconnected — retrying</span>
-                    </div>
-                </div>
+{% extends "base.html" %}
+
+{% block title %}Run Detail{% endblock %}
+
+{% block content %}
+<div class="page">
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem;">
+            <div>
+                <h2 id="run-title" class="card-title">Loading...</h2>
+                <div id="parent-run-link" style="display: none; margin-top: 0.5rem;"></div>
+            </div>
+            <div class="action-buttons">
+                <button id="replay-btn" class="btn btn-ghost" title="Replay this run for $0">Replay ($0)</button>
+                <button id="delete-btn" class="btn btn-danger" title="Delete this run">Delete</button>
+            </div>
+        </div>
+
+        <div class="run-info" id="run-info">
+            <div class="run-info-item">
+                <span class="run-info-label">Status</span>
+                <span class="run-info-value run-status" id="run-status">-</span>
+            </div>
+            <div class="run-info-item">
+                <span class="run-info-label">Kind</span>
+                <span class="run-info-value" id="run-kind-container">
+                    <span class="pill" id="run-kind">-</span>
+                </span>
+            </div>
+            <div class="run-info-item" id="gate-info-item" style="display: none;">
+                <span class="run-info-label">Gate</span>
+                <span class="run-info-value" id="run-gate">-</span>
+            </div>
+            <div class="run-info-item" id="agents-failed-item" style="display: none;">
+                <span class="run-info-label">Agents Failed</span>
+                <span class="run-info-value" id="run-agents-failed">-</span>
+            </div>
+            <div class="run-info-item">
+                <span class="run-info-label">Started</span>
+                <span class="run-info-value" id="run-started">-</span>
+            </div>
+            <div class="run-info-item">
+                <span class="run-info-label">Repo</span>
+                <span class="run-info-value" id="run-repo">-</span>
+            </div>
+            <div class="run-info-item" id="connection-badge-item" style="display: none;">
+                <span class="run-info-label">Connection</span>
+                <span class="run-info-value connection-badge" id="connection-badge">Disconnected — retrying</span>
+            </div>
+        </div>
                 <div class="mission-completion-pill" id="mission-completion-pill" style="display: none;"></div>
 
                 <!-- Mission Steering Controls -->
@@ -145,39 +143,32 @@
                     </div>
                 </div>
             </div>
-        </main>
     </div>
+</div>
+{% endblock %}
 
-    <script>
-        const RUN_ID = decodeURIComponent(window.location.pathname.split('/').pop());
-        const agentEvents = {}; // Store events by agent name
-        const agentData = {}; // Store agent metadata
-        let eventTimeRange = { min: Infinity, max: -Infinity };
-        let findings = [];
-        let targetRepo = null;
-        let runStatus = null;
-        let missionEventSource = null;
-        let manifestData = null;
-        let storyData = null;
+{% block scripts %}
+<script>
+    const { escapeHtml, pill, fmtCost, fmtAgo, encodeId, openStream } = window.Conduction;
+    const RUN_ID = decodeURIComponent(window.location.pathname.split('/').pop());
+    const agentEvents = {};
+    const agentData = {};
+    let eventTimeRange = { min: Infinity, max: -Infinity };
+    let findings = [];
+    let targetRepo = null;
+    let runStatus = null;
+    let runGatePassed = null;
+    let runAgentsFailed = null;
+    let missionEventSource = null;
+    let manifestData = null;
+    let storyData = null;
 
-        function escapeHtml(value) {
-            return String(value ?? '').replace(/[&<>"']/g, character => ({
-                '&': '&amp;',
-                '<': '&lt;',
-                '>': '&gt;',
-                '"': '&quot;',
-                "'": '&#39;'
-            }[character]));
-        }
-
-        function repoBasename(fullPath) {
-            if (!fullPath) {
-                return null;
-            }
-            const normalized = fullPath.replace(/\\/g, '/');
-            const segments = normalized.split('/').filter(Boolean);
-            return segments.length ? segments[segments.length - 1] : fullPath;
-        }
+    function repoBasename(fullPath) {
+        if (!fullPath) return null;
+        const normalized = fullPath.replace(/\\/g, '/');
+        const segments = normalized.split('/').filter(Boolean);
+        return segments.length ? segments[segments.length - 1] : fullPath;
+    }
 
         function renderSimpleMarkdown(text) {
             // Simple line-based markdown renderer
@@ -387,27 +378,26 @@
 
         async function fetchKindAndParent() {
             try {
-                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/manifest`);
-                if (response.ok) {
-                    const manifest = await response.json();
-                    const kind = manifest.kind || 'legacy';
-                    const parentRunId = manifest.parent_run_id;
+                const manifest = await window.Conduction.fetchJson(`/api/runs/${encodeId(RUN_ID)}/manifest`);
+                const kind = manifest.kind || 'legacy';
+                const parentRunId = manifest.parent_run_id;
 
-                    // Update kind badge
-                    const kindBadge = document.getElementById('run-kind');
-                    kindBadge.textContent = kind;
-                    kindBadge.className = `run-info-value kind-badge kind-${kind}`;
+                // Update kind badge
+                const kindBadge = document.getElementById('run-kind');
+                kindBadge.className = `pill pill-${kind}`;
+                kindBadge.textContent = kind;
 
-                    // Show parent link for replay runs
-                    if (kind === 'replay' && parentRunId) {
-                        const parentLink = document.getElementById('parent-run-link');
-                        parentLink.innerHTML = `<span class="parent-run-info">$0 replay of <a href="/runs/${encodeURIComponent(parentRunId)}">${escapeHtml(parentRunId)}</a></span>`;
-                        parentLink.style.display = 'block';
-                    }
+                // Show parent link for replay runs
+                if (kind === 'replay' && parentRunId) {
+                    const parentLink = document.getElementById('parent-run-link');
+                    parentLink.innerHTML = `<span class="muted">$0 replay of <a href="/runs/${encodeId(parentRunId)}">${escapeHtml(parentRunId)}</a></span>`;
+                    parentLink.style.display = 'block';
                 }
             } catch (error) {
                 console.error('Error fetching manifest for kind:', error);
-                document.getElementById('run-kind').textContent = 'legacy';
+                const kindBadge = document.getElementById('run-kind');
+                kindBadge.className = 'pill';
+                kindBadge.textContent = 'legacy';
             }
         }
 
@@ -442,16 +432,36 @@
 
         async function fetchRunMeta() {
             try {
-                const response = await fetch('/api/runs');
-                const runs = await response.json();
+                const runs = await window.Conduction.fetchJson('/api/runs');
                 const currentRun = Array.isArray(runs) ? runs.find(run => run.run_id === RUN_ID) : null;
 
                 if (currentRun) {
                     runStatus = currentRun.status || 'running';
-                    document.getElementById('run-started').textContent = currentRun.started_at
-                        ? new Date(currentRun.started_at).toLocaleString()
+                    runGatePassed = currentRun.gate_passed;
+                    runAgentsFailed = currentRun.agents_failed;
+
+                    document.getElementById('run-started').innerHTML = currentRun.started_at
+                        ? fmtAgo(currentRun.started_at)
                         : '-';
                     renderStatusPill(runStatus);
+
+                    // Show gate status if available
+                    if (runGatePassed !== undefined) {
+                        const gateItem = document.getElementById('gate-info-item');
+                        const gateValue = document.getElementById('run-gate');
+                        gateItem.style.display = 'flex';
+                        gateValue.innerHTML = runGatePassed
+                            ? '<span class="pill pill-passed">passed</span>'
+                            : '<span class="pill pill-failed">failed</span>';
+                    }
+
+                    // Show agents failed if available
+                    if (runAgentsFailed !== undefined) {
+                        const agentsFailedItem = document.getElementById('agents-failed-item');
+                        const agentsFailedValue = document.getElementById('run-agents-failed');
+                        agentsFailedItem.style.display = 'flex';
+                        agentsFailedValue.textContent = runAgentsFailed;
+                    }
                 }
 
                 checkRunStatus();
@@ -626,8 +636,7 @@
 
         function renderStatusPill(status) {
             const statusSpan = document.getElementById('run-status');
-            statusSpan.textContent = status;
-            statusSpan.className = `run-info-value run-status ${escapeHtml(status)}`;
+            statusSpan.innerHTML = pill(status);
         }
 
         function renderMissionCompletionPill(payload) {
@@ -937,6 +946,5 @@
             document.getElementById('replay-btn').addEventListener('click', handleReplay);
             document.getElementById('delete-btn').addEventListener('click', handleDelete);
         }
-    </script>
-</body>
-</html>
+</script>
+{% endblock %}

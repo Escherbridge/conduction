@@ -1,31 +1,16 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Launch Mission - Conduction</title>
-    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
-    <link rel="stylesheet" href="/static/css/styles.css">
-</head>
-<body>
-    <div id="app-root">
-        <header>
-            <h1>Conduction</h1>
-            <p>Launch Multi-Agent Mission</p>
-            <nav>
-                <a href="/">Home</a>
-                <a href="/runs">Runs</a>
-                <a href="/factory">Factory Pipelines</a>
-            </nav>
-        </header>
-        <main id="main-content">
-            <div class="launch-container">
-                <div class="launch-header">
-                    <h2>Launch Mission</h2>
-                    <div id="dry-run-badge" style="display: none;" class="dry-run-badge">
-                        🧪 Dry-run mode
-                    </div>
-                </div>
+{% extends "base.html" %}
+
+{% block title %}Launch{% endblock %}
+
+{% block content %}
+<div class="page">
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <h2 class="card-title">Launch Mission</h2>
+            <div id="dry-run-badge" style="display: none;" class="badge">
+                🧪 Dry-run mode
+            </div>
+        </div>
 
                 <form id="launch-form">
                     <!-- Mission Configuration -->
@@ -114,26 +99,18 @@
 
                     <div id="error-display" class="error-display" style="display: none;"></div>
                 </form>
-            </div>
-        </main>
     </div>
+</div>
+{% endblock %}
 
-    <script>
-        let agentCounter = 0;
-        let availableSdks = {};
-        let isDryRun = false;
+{% block scripts %}
+<script>
+    const { escapeHtml, fetchJson, encodeId } = window.Conduction;
+    let agentCounter = 0;
+    let availableSdks = {};
+    let isDryRun = false;
 
-        function escapeHtml(value) {
-            return String(value ?? '').replace(/[&<>"']/g, character => ({
-                '&': '&amp;',
-                '<': '&lt;',
-                '>': '&gt;',
-                '"': '&quot;',
-                "'": '&#39;'
-            }[character]));
-        }
-
-        const TOOL_OPTIONS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
+    const TOOL_OPTIONS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
 
         window.addEventListener('DOMContentLoaded', async () => {
             // Fetch available SDKs
@@ -150,8 +127,7 @@
 
         async function fetchSdks() {
             try {
-                const response = await fetch('/api/sdks');
-                const data = await response.json();
+                const data = await fetchJson('/api/sdks');
                 availableSdks = data.sdks || {};
                 isDryRun = data.dry_run || false;
 
@@ -345,39 +321,35 @@
                 };
 
                 // Submit
-                const response = await fetch('/api/runs', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
+                try {
+                    const data = await fetchJson('/api/runs', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
 
-                const data = await response.json();
-
-                if (response.ok) {
                     statusSpan.textContent = `✓ Launched: ${data.run_id}`;
-                    statusSpan.style.color = '#50c878';
+                    statusSpan.style.color = 'var(--ok)';
 
                     // Redirect after short delay
                     setTimeout(() => {
-                        window.location.href = `/runs/${encodeURIComponent(data.run_id)}`;
+                        window.location.href = `/runs/${encodeId(data.run_id)}`;
                     }, 1000);
-                } else {
-                    // Show error
-                    const errorMessage = data.error || 'Launch failed';
-                    errorDisplay.textContent = errorMessage;
+                } catch (error) {
+                    // fetchJson throws with server error text
+                    errorDisplay.textContent = error.message || 'Launch failed';
                     errorDisplay.style.display = 'block';
                     statusSpan.textContent = '✗ Failed';
-                    statusSpan.style.color = '#e74c3c';
+                    statusSpan.style.color = 'var(--danger)';
                     submitBtn.disabled = false;
                 }
             } catch (error) {
                 errorDisplay.textContent = `Error: ${escapeHtml(error.message)}`;
                 errorDisplay.style.display = 'block';
                 statusSpan.textContent = '✗ Error';
-                statusSpan.style.color = '#e74c3c';
+                statusSpan.style.color = 'var(--danger)';
                 submitBtn.disabled = false;
             }
         }
-    </script>
-</body>
-</html>
+</script>
+{% endblock %}

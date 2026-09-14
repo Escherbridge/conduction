@@ -1,25 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Factory Pipelines - Conduction</title>
-    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
-    <link rel="stylesheet" href="/static/css/styles.css">
-</head>
-<body>
-    <div id="app-root">
-        <header>
-            <h1>Conduction</h1>
-            <p>Factory Pipeline Manager</p>
-            <nav>
-                <a href="/">Home</a>
-                <a href="/runs">Runs</a>
-                <a href="/launch">Launch Mission</a>
-            </nav>
-        </header>
-        <main id="main-content">
-            <div class="factory-container">
+{% extends "base.html" %}
+
+{% block title %}Factory{% endblock %}
+
+{% block content %}
+<div class="page">
+    <div class="factory-container">
                 <!-- Factory Run Form -->
                 <div class="factory-section">
                     <h2>Run Factory</h2>
@@ -155,23 +140,15 @@
                     <div id="pipeline-view"></div>
                 </div>
             </div>
-        </main>
-    </div>
+</div>
+{% endblock %}
 
-    <script>
-        let factoryRuns = [];
-        let selectedRunId = null;
-        let pollInterval = null;
-
-        function escapeHtml(value) {
-            return String(value ?? '').replace(/[&<>"']/g, character => ({
-                '&': '&amp;',
-                '<': '&lt;',
-                '>': '&gt;',
-                '"': '&quot;',
-                "'": '&#39;'
-            }[character]));
-        }
+{% block scripts %}
+<script>
+    const { escapeHtml, fetchJson, pill, encodeId } = window.Conduction;
+    let factoryRuns = [];
+    let selectedRunId = null;
+    let pollInterval = null;
 
         window.addEventListener('DOMContentLoaded', async () => {
             // Set up form handler
@@ -225,17 +202,15 @@
                     ...(factoryPath ? { factory_path: factoryPath } : {})
                 };
 
-                const response = await fetch('/api/factory/runs', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
+                try {
+                    const data = await fetchJson('/api/factory/runs', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
 
-                const data = await response.json();
-
-                if (response.ok) {
                     statusSpan.textContent = `✓ Launched: ${data.factory_run_id}`;
-                    statusSpan.style.color = '#50c878';
+                    statusSpan.style.color = 'var(--ok)';
 
                     // Reload runs list and select the new run
                     await loadFactoryRuns();
@@ -244,12 +219,12 @@
                     // Clear form
                     document.getElementById('factory_path').value = '';
                     submitBtn.disabled = false;
-                } else {
-                    const errorMessage = data.error || 'Launch failed';
+                } catch (error) {
+                    const errorMessage = error.message || 'Launch failed';
                     errorDisplay.textContent = errorMessage;
                     errorDisplay.style.display = 'block';
                     statusSpan.textContent = '✗ Failed';
-                    statusSpan.style.color = '#e74c3c';
+                    statusSpan.style.color = 'var(--danger)';
                     submitBtn.disabled = false;
                 }
             } catch (error) {
@@ -263,8 +238,7 @@
 
         async function loadFactoryRuns() {
             try {
-                const response = await fetch('/api/factory/runs');
-                factoryRuns = await response.json();
+                factoryRuns = await fetchJson('/api/factory/runs');
                 renderRunsList();
 
                 // If a run is selected, refresh its detail
@@ -300,7 +274,7 @@
 
             container.innerHTML = sortedRuns.map(run => {
                 const isSelected = run.factory_run_id === selectedRunId;
-                const statusClass = escapeHtml(run.status || 'running');
+                const status = run.status || 'running';
                 const repoName = run.target_repo ? run.target_repo.split(/[/\\]/).filter(Boolean).pop() : '-';
 
                 return `
@@ -310,11 +284,11 @@
                         <div>
                             <div class="factory-run-title">${escapeHtml(run.factory_slug || run.factory_run_id)}</div>
                             <div class="factory-run-meta">
-                                <span class="repo-badge" title="${escapeHtml(run.target_repo || '')}">${escapeHtml(repoName)}</span>
-                                <span>${run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</span>
+                                <span class="badge" title="${escapeHtml(run.target_repo || '')}">${escapeHtml(repoName)}</span>
+                                <span class="muted">${run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</span>
                             </div>
                         </div>
-                        <span class="run-status ${statusClass}">${statusClass}</span>
+                        ${pill(status)}
                     </div>
                 `;
             }).join('');
@@ -335,9 +309,7 @@
 
         async function loadRunDetail(runId) {
             try {
-                const response = await fetch(`/api/factory/runs/${encodeURIComponent(runId)}`);
-                const runState = await response.json();
-
+                const runState = await fetchJson(`/api/factory/runs/${encodeId(runId)}`);
                 renderPipelineView(runState);
                 updateControlButtons(runState);
             } catch (error) {
@@ -365,8 +337,8 @@
             container.innerHTML = `
                 <div class="pipeline-status-bar">
                     <span class="pipeline-status-label">Overall Status:</span>
-                    <span class="run-status ${escapeHtml(runState.status || 'running')}">${escapeHtml(runState.status || 'running')}</span>
-                    <span style="color: #666; margin-left: 1rem;">Wave ${runState.current_wave + 1} of ${runState.waves.length}</span>
+                    ${pill(runState.status || 'running')}
+                    <span class="muted" style="margin-left: 1rem;">Wave ${runState.current_wave + 1} of ${runState.waves.length}</span>
                 </div>
 
                 <div class="wave-pipeline">
@@ -376,7 +348,7 @@
         }
 
         function renderWaveCard(wave, index, runState) {
-            const statusClass = escapeHtml(wave.status || 'pending');
+            const status = wave.status || 'pending';
             const isCurrent = index === runState.current_wave;
             const runId = wave.run_id;
             const gateKeys = wave.gate_passed !== undefined
@@ -384,13 +356,13 @@
                 : 'unknown';
 
             return `
-                <div class="wave-card ${isCurrent ? 'current' : ''} ${statusClass}">
+                <div class="wave-card ${isCurrent ? 'current' : ''} wave-${escapeHtml(status)}">
                     <div class="wave-card-header">
                         <div>
                             <span class="wave-number">Wave ${index + 1}</span>
                             <span class="wave-slug">${escapeHtml(wave.slug)}</span>
                         </div>
-                        <span class="run-status ${statusClass}">${statusClass}</span>
+                        ${pill(status)}
                     </div>
 
                     <div class="wave-card-body">
@@ -406,10 +378,8 @@
 
                         ${wave.gate_passed !== undefined ? `
                             <div class="wave-info-row">
-                                <span class="wave-info-label">Gate Passed:</span>
-                                <span class="${wave.gate_passed ? 'gate-passed' : 'gate-failed'}">
-                                    ${wave.gate_passed ? '✓ Yes' : '✗ No'}
-                                </span>
+                                <span class="wave-info-label">Gate:</span>
+                                ${wave.gate_passed ? '<span class="pill pill-passed">passed</span>' : '<span class="pill pill-failed">failed</span>'}
                             </div>
                         ` : ''}
 
@@ -422,7 +392,7 @@
 
                         ${runId ? `
                             <div class="wave-info-row" style="margin-top: 0.5rem;">
-                                <a href="/runs/${encodeURIComponent(runId)}" class="wave-run-link">
+                                <a href="/runs/${encodeId(runId)}" class="wave-run-link">
                                     View Mission Detail →
                                 </a>
                             </div>
@@ -477,20 +447,13 @@
             btn.disabled = true;
 
             try {
-                const response = await fetch(`/api/factory/runs/${encodeURIComponent(selectedRunId)}/interrupt`, {
+                await fetchJson(`/api/factory/runs/${encodeId(selectedRunId)}/interrupt`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
 
-                const data = await response.json();
-
-                if (response.ok) {
-                    alert('Interrupt signal sent');
-                    await loadRunDetail(selectedRunId);
-                } else {
-                    alert(`Failed: ${data.error || 'Unknown error'}`);
-                    btn.disabled = false;
-                }
+                alert('Interrupt signal sent');
+                await loadRunDetail(selectedRunId);
             } catch (error) {
                 alert(`Error: ${error.message}`);
                 btn.disabled = false;
@@ -504,22 +467,15 @@
             btn.disabled = true;
 
             try {
-                const response = await fetch(`/api/factory/runs/${encodeURIComponent(selectedRunId)}/resume`, {
+                const data = await fetchJson(`/api/factory/runs/${encodeId(selectedRunId)}/resume`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
 
-                const data = await response.json();
-
-                if (response.ok) {
-                    alert(`Resumed: ${data.factory_run_id}`);
-                    await loadFactoryRuns();
-                    await loadRunDetail(selectedRunId);
-                    btn.disabled = false;
-                } else {
-                    alert(`Failed: ${data.error || 'Unknown error'}`);
-                    btn.disabled = false;
-                }
+                alert(`Resumed: ${data.factory_run_id}`);
+                await loadFactoryRuns();
+                await loadRunDetail(selectedRunId);
+                btn.disabled = false;
             } catch (error) {
                 alert(`Error: ${error.message}`);
                 btn.disabled = false;
@@ -532,6 +488,5 @@
                 clearInterval(pollInterval);
             }
         });
-    </script>
-</body>
-</html>
+</script>
+{% endblock %}

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Conduction{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script>
+        // Apply the persisted theme before first paint to avoid a flash.
+        (function () {
+            try {
+                var stored = localStorage.getItem("conduction-theme");
+                document.documentElement.setAttribute("data-theme", stored === "light" ? "light" : "dark");
+            } catch (e) { /* private mode */ }
+        })();
+    </script>
+    <script src="/static/js/app.js" defer></script>
+</head>
+<body>
+<div class="app-shell">
+    <div class="app-brand"><span class="dot"></span> Conduction</div>
+
+    <nav class="sidebar">
+        <a href="/" class="{% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+        <a href="/runs" class="{% if active == 'runs' %}active{% endif %}">Runs</a>
+        <a href="/factory" class="{% if active == 'factory' %}active{% endif %}">Factory</a>
+        <a href="/launch" class="{% if active == 'launch' %}active{% endif %}">Launch</a>
+        <a href="/projects" class="{% if active == 'projects' %}active{% endif %}">Projects</a>
+        <a href="/query" class="{% if active == 'query' %}active{% endif %}">Query</a>
+        <a href="/settings" class="{% if active == 'settings' %}active{% endif %}">Settings</a>
+        <div class="sidebar-foot mono">agentgraph harness</div>
+    </nav>
+
+    <header class="topbar">
+        <h1>{% block page_title %}{{ page_title | default("Dashboard") }}{% endblock %}</h1>
+        {% if dry_run %}<span class="dry-run-badge">dry-run mode</span>{% endif %}
+        <span class="topbar-spacer"></span>
+        <span class="badge" data-live-agents>agents -</span>
+        <button type="button" class="theme-toggle" data-theme-toggle>dark</button>
+    </header>
+
+    <main class="page">
+        {% block content %}{% endblock %}
+    </main>
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

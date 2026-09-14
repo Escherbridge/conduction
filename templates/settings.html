@@ -1,0 +1,404 @@
+{% extends "base.html" %}
+
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<div class="page">
+    <div class="card">
+        <h2 class="card-title">Ecosystem Settings</h2>
+        <p class="muted">Global rules, goals, and schedules that apply across all projects</p>
+    </div>
+
+    <div class="card" style="margin-top: 1.5rem;">
+        <div class="tabs">
+            <button class="tab tab-active" data-tab="rules">Ecosystem Rules</button>
+            <button class="tab" data-tab="goals">Ecosystem Goals</button>
+            <button class="tab" data-tab="schedules">Ecosystem Schedules</button>
+            <button class="tab" data-tab="sdks">SDK Availability</button>
+            <button class="tab" data-tab="system">System</button>
+        </div>
+
+        <div id="tab-rules" class="tab-content" style="display: block;">
+            <h3>Ecosystem Rules</h3>
+            <p class="muted">These rules apply to all runs across all projects unless overridden</p>
+            <div id="ecosystem-rules-list"></div>
+            <button id="add-ecosystem-rule-btn" class="btn btn-primary" style="margin-top: 1rem;">Add Rule</button>
+        </div>
+
+        <div id="tab-goals" class="tab-content" style="display: none;">
+            <h3>Ecosystem Goals</h3>
+            <p class="muted">Cross-project goals and initiatives</p>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem;">
+                <div>
+                    <h4 style="margin-bottom: 0.5rem;">Open</h4>
+                    <div id="ecosystem-goals-open" class="goals-column"></div>
+                </div>
+                <div>
+                    <h4 style="margin-bottom: 0.5rem;">Done</h4>
+                    <div id="ecosystem-goals-done" class="goals-column"></div>
+                </div>
+                <div>
+                    <h4 style="margin-bottom: 0.5rem;">Blocked</h4>
+                    <div id="ecosystem-goals-blocked" class="goals-column"></div>
+                </div>
+            </div>
+            <button id="add-ecosystem-goal-btn" class="btn btn-primary" style="margin-top: 1rem;">Add Goal</button>
+        </div>
+
+        <div id="tab-schedules" class="tab-content" style="display: none;">
+            <h3>Ecosystem Schedules</h3>
+            <p class="muted">Scheduled factory runs that target specific repositories</p>
+            <div id="ecosystem-schedules-table"></div>
+            <button id="add-ecosystem-schedule-btn" class="btn btn-primary" style="margin-top: 1rem;">Add Schedule</button>
+        </div>
+
+        <div id="tab-sdks" class="tab-content" style="display: none;">
+            <h3>SDK Availability</h3>
+            <p class="muted">Which SDKs are installed and available for agent missions</p>
+            <div id="sdks-list"></div>
+        </div>
+
+        <div id="tab-system" class="tab-content" style="display: none;">
+            <h3>System Configuration</h3>
+
+            <div style="margin-top: 1rem;">
+                <h4>Dry-Run Mode</h4>
+                <div style="display: flex; align-items: center; gap: 1rem; margin-top: 0.5rem;">
+                    <input type="checkbox" id="dry-run-toggle">
+                    <label for="dry-run-toggle">Enable dry-run mode (agents use ScriptedWorker, no Claude API calls)</label>
+                </div>
+                <p class="muted" style="margin-top: 0.5rem;">Requires server restart to take effect. Set via CONDUCTION_DRY_RUN environment variable.</p>
+            </div>
+
+            <div style="margin-top: 2rem;">
+                <h4>Scheduler State</h4>
+                <div id="scheduler-state"></div>
+                <button id="refresh-scheduler-btn" class="btn" style="margin-top: 0.5rem;">Refresh</button>
+            </div>
+
+            <div style="margin-top: 2rem;">
+                <h4>Database Location</h4>
+                <p class="mono" id="db-location">Loading...</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const { escapeHtml, fetchJson, pill, fmtAgo } = window.Conduction;
+
+let ecosystemData = null;
+
+function generateId() {
+    return Math.random().toString(36).substring(2, 8);
+}
+
+async function loadEcosystem() {
+    try {
+        ecosystemData = await fetchJson('/api/ecosystem');
+        renderEcosystemRules();
+    } catch (error) {
+        document.getElementById('ecosystem-rules-list').innerHTML =
+            `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+    }
+}
+
+function renderEcosystemRules() {
+    const container = document.getElementById('ecosystem-rules-list');
+    const rules = ecosystemData.rules || [];
+
+    if (rules.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>No ecosystem rules defined</p></div>';
+        return;
+    }
+
+    let html = '<div style="display: flex; flex-direction: column; gap: 0.75rem;">';
+    rules.forEach((rule, idx) => {
+        html += '<div class="card" style="padding: 1rem;">';
+        html += `<div style="display: flex; gap: 1rem; align-items: start;">`;
+        html += `<input type="checkbox" ${rule.enabled ? 'checked' : ''} onchange="toggleEcosystemRule(${idx})" style="margin-top: 0.25rem;">`;
+        html += `<div style="flex: 1;">`;
+        html += `<textarea id="eco-rule-text-${idx}" rows="2" style="width: 100%; font-family: inherit; padding: 0.5rem; border: 1px solid var(--border); border-radius: var(--radius);">${escapeHtml(rule.text)}</textarea>`;
+        html += `<div style="margin-top: 0.5rem; display: flex; gap: 1rem; align-items: center;">`;
+        html += `<select id="eco-rule-scope-${idx}" style="padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius);">`;
+        html += `<option value="all" ${rule.scope === 'all' ? 'selected' : ''}>All agents</option>`;
+        html += `<option value="writers" ${rule.scope === 'writers' ? 'selected' : ''}>Writers only</option>`;
+        html += `<option value="readers" ${rule.scope === 'readers' ? 'selected' : ''}>Readers only</option>`;
+        html += `</select>`;
+        html += `<button class="btn" onclick="updateEcosystemRule(${idx})">Save</button>`;
+        html += `<button class="btn btn-danger" onclick="deleteEcosystemRule(${idx})">Delete</button>`;
+        html += `</div></div></div></div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+async function toggleEcosystemRule(idx) {
+    ecosystemData.rules[idx].enabled = !ecosystemData.rules[idx].enabled;
+    await saveEcosystem();
+}
+
+async function updateEcosystemRule(idx) {
+    ecosystemData.rules[idx].text = document.getElementById(`eco-rule-text-${idx}`).value;
+    ecosystemData.rules[idx].scope = document.getElementById(`eco-rule-scope-${idx}`).value;
+    await saveEcosystem();
+}
+
+async function deleteEcosystemRule(idx) {
+    if (!confirm('Delete this ecosystem rule?')) return;
+    ecosystemData.rules.splice(idx, 1);
+    await saveEcosystem();
+}
+
+async function addEcosystemRule() {
+    ecosystemData.rules = ecosystemData.rules || [];
+    ecosystemData.rules.push({
+        id: generateId(),
+        text: 'New ecosystem rule',
+        scope: 'all',
+        enabled: true
+    });
+    await saveEcosystem();
+}
+
+function renderEcosystemGoals() {
+    const goals = ecosystemData.goals || [];
+    ['open', 'done', 'blocked'].forEach(status => {
+        const container = document.getElementById(`ecosystem-goals-${status}`);
+        const statusGoals = goals.filter(g => g.status === status);
+
+        if (statusGoals.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>No goals</p></div>';
+            return;
+        }
+
+        let html = '<div style="display: flex; flex-direction: column; gap: 0.5rem;">';
+        statusGoals.forEach(goal => {
+            html += '<div class="card" style="padding: 0.75rem; cursor: pointer;" onclick="editEcosystemGoal(\'' + escapeHtml(goal.id) + '\')">';
+            html += `<strong>${escapeHtml(goal.title)}</strong>`;
+            if (goal.description) {
+                html += `<p class="muted" style="font-size: 0.9rem; margin-top: 0.25rem;">${escapeHtml(goal.description)}</p>`;
+            }
+            if (goal.linked_runs && goal.linked_runs.length > 0) {
+                html += `<div class="badge" style="margin-top: 0.5rem;">${goal.linked_runs.length} linked runs</div>`;
+            }
+            html += '</div>';
+        });
+        html += '</div>';
+        container.innerHTML = html;
+    });
+}
+
+function editEcosystemGoal(goalId) {
+    const goal = ecosystemData.goals.find(g => g.id === goalId);
+    if (!goal) return;
+
+    const newTitle = prompt('Goal title:', goal.title);
+    if (newTitle === null) return;
+
+    const newDesc = prompt('Description:', goal.description || '');
+    if (newDesc === null) return;
+
+    const newStatus = prompt('Status (open/done/blocked):', goal.status);
+    if (!['open', 'done', 'blocked'].includes(newStatus)) {
+        alert('Invalid status');
+        return;
+    }
+
+    goal.title = newTitle;
+    goal.description = newDesc;
+    goal.status = newStatus;
+    goal.updated_at = new Date().toISOString();
+
+    saveEcosystem();
+}
+
+async function addEcosystemGoal() {
+    const title = prompt('Goal title:');
+    if (!title) return;
+
+    const description = prompt('Description (optional):');
+
+    ecosystemData.goals = ecosystemData.goals || [];
+    ecosystemData.goals.push({
+        id: generateId(),
+        title: title,
+        description: description || '',
+        status: 'open',
+        linked_runs: [],
+        updated_at: new Date().toISOString()
+    });
+
+    await saveEcosystem();
+}
+
+async function renderEcosystemSchedules() {
+    const container = document.getElementById('ecosystem-schedules-table');
+
+    try {
+        const allSchedules = await fetchJson('/api/schedules');
+        const ecosystemSchedules = allSchedules.filter(s => s.source === 'ecosystem');
+
+        if (ecosystemSchedules.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>No ecosystem schedules</p></div>';
+            return;
+        }
+
+        let html = '<table class="table"><thead><tr>';
+        html += '<th>Target Repo</th><th>Kind</th><th>Frequency</th><th>Enabled</th><th>Last Run</th><th>Next Due</th><th>Actions</th>';
+        html += '</tr></thead><tbody>';
+
+        ecosystemSchedules.forEach(sched => {
+            const freq = sched.every || sched.cron || '-';
+            const lastRun = sched.last_run_at ? new Date(sched.last_run_at).toLocaleString() : 'Never';
+            const nextDue = sched.next_due ? new Date(sched.next_due).toLocaleString() : '-';
+            const repoBasename = sched.target_repo ? sched.target_repo.replace(/\\/g, '/').split('/').filter(Boolean).pop() : '-';
+
+            html += '<tr>';
+            html += `<td class="mono" title="${escapeHtml(sched.target_repo)}">${escapeHtml(repoBasename)}</td>`;
+            html += `<td>${pill(sched.kind)}</td>`;
+            html += `<td class="mono">${escapeHtml(freq)}</td>`;
+            html += `<td>${sched.enabled ? '✓' : '✗'}</td>`;
+            html += `<td class="muted">${escapeHtml(lastRun)}</td>`;
+            html += `<td>${escapeHtml(nextDue)}</td>`;
+            html += `<td><button class="btn" onclick="runScheduleNow('${escapeHtml(sched.id)}')">Run Now</button></td>`;
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (error) {
+        container.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+    }
+}
+
+async function runScheduleNow(schedId) {
+    if (!confirm('Run this schedule now?')) return;
+
+    try {
+        const result = await fetchJson(`/api/schedules/${encodeURIComponent(schedId)}/run-now`, {
+            method: 'POST'
+        });
+        alert(`Launched factory run: ${result.factory_run_id}`);
+        renderEcosystemSchedules();
+    } catch (error) {
+        alert(`Error: ${error.message}`);
+    }
+}
+
+async function addEcosystemSchedule() {
+    alert('Schedule creation UI coming soon - edit ecosystem.json directly for now');
+}
+
+async function loadSDKs() {
+    const container = document.getElementById('sdks-list');
+
+    try {
+        const sdks = await fetchJson('/api/sdks');
+
+        let html = '<table class="table"><thead><tr>';
+        html += '<th>SDK</th><th>Available</th><th>Version</th>';
+        html += '</tr></thead><tbody>';
+
+        Object.entries(sdks).forEach(([name, info]) => {
+            const available = info.available ? '✓' : '✗';
+            const statusClass = info.available ? 'pill-passed' : 'pill-failed';
+
+            html += '<tr>';
+            html += `<td><code>${escapeHtml(name)}</code></td>`;
+            html += `<td><span class="pill ${statusClass}">${available}</span></td>`;
+            html += `<td class="muted">${escapeHtml(info.version || '-')}</td>`;
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (error) {
+        container.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+    }
+}
+
+async function loadSchedulerState() {
+    const container = document.getElementById('scheduler-state');
+
+    try {
+        const summary = await fetchJson('/api/observe/summary');
+
+        // Scheduler state would come from a dedicated endpoint, but we can show basic info
+        let html = '<div class="card" style="padding: 1rem;">';
+        html += `<p><strong>Active Runs:</strong> ${summary.active_runs}</p>`;
+        html += `<p><strong>Live Agents:</strong> ${summary.live_agents}</p>`;
+        html += `<p class="muted" style="margin-top: 0.5rem;">Scheduler runs every 60s when enabled (CONDUCTION_SCHEDULER=1)</p>`;
+        html += '</div>';
+
+        container.innerHTML = html;
+    } catch (error) {
+        container.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+    }
+}
+
+async function saveEcosystem() {
+    try {
+        await fetchJson('/api/ecosystem', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(ecosystemData)
+        });
+        await loadEcosystem();
+    } catch (error) {
+        alert(`Error saving: ${error.message}`);
+    }
+}
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        const tabName = tab.dataset.tab;
+
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('tab-active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+
+        tab.classList.add('tab-active');
+        document.getElementById(`tab-${tabName}`).style.display = 'block';
+
+        if (tabName === 'goals' && ecosystemData) renderEcosystemGoals();
+        if (tabName === 'schedules') renderEcosystemSchedules();
+        if (tabName === 'sdks') loadSDKs();
+        if (tabName === 'system') {
+            loadSchedulerState();
+            document.getElementById('db-location').textContent = 'Mirror database location tracked by backend';
+        }
+    });
+});
+
+// Button handlers
+document.getElementById('add-ecosystem-rule-btn').addEventListener('click', addEcosystemRule);
+document.getElementById('add-ecosystem-goal-btn').addEventListener('click', addEcosystemGoal);
+document.getElementById('add-ecosystem-schedule-btn').addEventListener('click', addEcosystemSchedule);
+document.getElementById('refresh-scheduler-btn').addEventListener('click', loadSchedulerState);
+
+// Global functions for inline handlers
+window.toggleEcosystemRule = toggleEcosystemRule;
+window.updateEcosystemRule = updateEcosystemRule;
+window.deleteEcosystemRule = deleteEcosystemRule;
+window.editEcosystemGoal = editEcosystemGoal;
+window.runScheduleNow = runScheduleNow;
+
+// Dry-run toggle (display only - actual setting is via env var)
+document.getElementById('dry-run-toggle').addEventListener('change', (e) => {
+    alert('Dry-run mode is controlled by the CONDUCTION_DRY_RUN environment variable. Restart the server with CONDUCTION_DRY_RUN=1 to enable.');
+    e.target.checked = false; // Reset since we can't actually change it from UI
+});
+
+// Load on ready
+loadEcosystem();
+</script>
+
+<style>
+.goals-column {
+    min-height: 100px;
+}
+</style>
+{% endblock %}

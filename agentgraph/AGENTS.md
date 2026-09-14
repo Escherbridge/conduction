@@ -114,3 +114,53 @@ Schema (version 1): `{"schema": 1, "kind": "mission"|"resume"|"replay"|"factory-
 ## JSONL Envelope Trap
 
 **EVERY LINE is wrapped**: `{"seq": n, "run_id": "...", "event": {...event...}}`. The event payload is under the "event" key. Code that checks `line["type"]` at the top level silently matches nothing. Always unwrap first: `envelope.get("event", envelope)` or use `agentgraph.log.read_envelopes` / `read_events` (log.py).
+
+## Policy Data and Rule Binding (Wave L)
+
+**Policy scope**: Ecosystem-wide (`.agentgraph/ecosystem.json`) and per-project (`.agentgraph/project.json`). Both versioned; project.json gains `!project.json` and `!ecosystem.json` in AGENTGRAPH_GITIGNORE.
+
+**Structures** (policy.py:1–40):
+- `Rule`: {id, text, scope ("all"|"writers"|"readers"), enabled}
+- `Goal`: {id, title, description, status, linked_runs, updated_at}
+- `Schedule`: {id, kind ("factory"|"mission"), factory_path, every/cron, enabled, last_run_at, last_factory_run_id}
+
+**Rule binding** (policy.py: `effective_rules`, `rules_block`, `apply_rules`): `effective_rules(ecosystem, project)` merges and returns enabled rules (ecosystem first). `rules_block(rules, *, writer: bool)` renders a "RULES (binding)" marker section; writers = specs with Edit/Write in tools. `apply_rules(specs, rules)` prepends the block to each brief once (idempotent marker prevents re-application). Writers see all rules; readers see "readers" and "all" scopes. The block is injected during `Mission.__init__` (mission.py) via `FactoryRunner(..., rules=...) or launch_mission(..., rules=...)`.
+
+**Facts** (policy.py: `rules_fact`): Converted to `("rules", "Binding rules for this run", detail)` and seeded into Mission facts so agents read applicable rules from the board, not the brief.
+
+## app.ctx-Only Rule and State Isolation (Wave L)
+
+**Shared state** (app.py): Request handlers NEVER import app at module level. Instead, they access `request.app.ctx` (Sanic request context) which holds:
+- `mirror`: SqliteMirror instance (lazy-created per request).
+- `mirror_lock`: asyncio.Lock for concurrent access.
+- `mission_processes`: dict {run_id → Process} for background missions.
+- `factory_processes`: dict {factory_run_id → Process} for background factory runs.
+- `scheduler_state`: {last_tick (iso), launched (list of factory_run_ids)}.
+
+This isolates handler code from app initialization order and enables clean testing (tests mock request.app.ctx instead of patching module globals). Blueprints reach app state ONLY via handlers' request.app.ctx (routes/*.py:1–20).
+
+## Scheduler Integration (Wave L)
+
+**start_scheduler(app)** (routes/scheduler.py): Registered on `after_server_start` hook. Spawns an asyncio task that fires every 60 s:
+1. Load ecosystem and all project configs.
+2. Compute `due_schedules(ecosystem, projects, now)` (policy.py).
+3. For each (schedule, target_repo), check if that repo has a running factory (409 conflict if so).
+4. Launch via factory machinery (respects CONDUCTION_DRY_RUN).
+5. Update `last_run_at` and `last_factory_run_id` in the owning Schedule doc.
+6. Set `app.ctx.scheduler_state = {last_tick: iso, launched: [...]}`.
+
+Disabled when `CONDUCTION_SCHEDULER=0` (tests set this; test runners set it unless testing the scheduler itself). No external deps; schedule evaluation uses `next_due(schedule, now, last_run_at)` (policy.py) supporting `every` (m/h/d suffix) and 5-field cron with `*`, `*/N`, `A,B`, `A-B`.
+
+## FactoryRunner and Rules (Wave L)
+
+**FactoryRunner** (agentgraph/factory.py:173–303): Executes waves in order. Constructor accepts `rules: list[Rule] = ()` (policy.py loads via app route handler). Before each wave, `apply_rules(agents, rules)` prepends binding rules to every brief. Each wave becomes a `Mission` with the modified specs. The wave manifest (kind "factory-wave") records the rules state at that wave, so replays are deterministic even if rules have changed.
+
+## New Routes (Wave L Contract)
+
+Four new endpoints support manifests and replay:
+- **GET /api/runs/<id>/manifest**: Return manifest JSON (404 if missing). app.py and sqlite_sink.py.
+- **GET /api/runs/<id>/story**: Narrated run as text/markdown. Uses `narrate_path(run.jsonl)` in asyncio.to_thread.
+- **POST /api/runs/<id>/replay**: Creates $0 replay run from manifest, returns {run_id, slug, parent_run_id}. Creates `.agentgraph/runs/<slug>-replay-<unix ts>/`. 409 if running, 400 if no manifest.
+- **DELETE /api/runs/<id>**: Removes run dir and SQLite rows (SqliteMirror.delete_run). 204 if successful, 409 if running.
+
+Run list items gain "kind" (manifest or "legacy" when absent) and "parent_run_id" badge ("$0 replay of <parent>").

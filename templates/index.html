@@ -1,37 +1,303 @@
-<!DOCTYPE html>
-<html lang="en">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Conduction - Mission Monitor</title>
-        <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
-        <link rel="stylesheet" href="/static/css/styles.css">
-    </head>
-    <body>
-        <div id="app-root">
-            <header>
-                <h1>Conduction</h1>
-                <p>Multi-agent mission monitoring and conductor track management</p>
-            </header>
-            <main id="main-content">
-                <div style="background: white; border-radius: 8px; padding: 2rem; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-                    <h2 style="margin-bottom: 1.5rem; color: #667eea;">Welcome to Conduction</h2>
-                    <p style="margin-bottom: 1rem; line-height: 1.6; color: #666;">
-                        Monitor multi-agent mission runs and manage conductor tracks across your projects.
-                    </p>
-                    <div style="display: flex; gap: 1rem; margin-top: 2rem;">
-                        <a href="/launch" style="display: inline-block; padding: 0.75rem 1.5rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; border-radius: 6px; font-weight: 500; transition: transform 0.2s;">
-                            Launch Mission →
-                        </a>
-                        <a href="/runs" style="display: inline-block; padding: 0.75rem 1.5rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; border-radius: 6px; font-weight: 500; transition: transform 0.2s;">
-                            View Mission Runs →
-                        </a>
-                        <a href="/factory" style="display: inline-block; padding: 0.75rem 1.5rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; border-radius: 6px; font-weight: 500; transition: transform 0.2s;">
-                            Factory Pipelines →
-                        </a>
-                    </div>
-                </div>
-            </main>
-        </div>
-    </body>
-</html>
+{% extends "base.html" %}
+{% block title %}Dashboard - Conduction{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+    <div class="page-actions">
+        <a class="btn btn-primary btn-lg" href="/launch">Launch mission</a>
+        <a class="btn btn-lg" href="/factory">Run factory</a>
+        <a class="btn btn-lg" href="/projects">Register project</a>
+    </div>
+</div>
+
+<div class="grid grid-kpi mb-2" id="kpis">
+    <div class="kpi"><div class="kpi-value" id="kpi-active-runs">-</div><div class="kpi-label">Active runs</div></div>
+    <div class="kpi kpi-warn"><div class="kpi-value" id="kpi-live-agents">-</div><div class="kpi-label">Live agents</div></div>
+    <div class="kpi"><div class="kpi-value" id="kpi-cost-today">-</div><div class="kpi-label">Cost today</div></div>
+    <div class="kpi"><div class="kpi-value" id="kpi-cost-total">-</div><div class="kpi-label">Cost total</div></div>
+    <div class="kpi kpi-ok"><div class="kpi-value" id="kpi-gate">-</div><div class="kpi-label">Gate pass rate (20)</div></div>
+    <div class="kpi kpi-danger"><div class="kpi-value" id="kpi-violations">-</div><div class="kpi-label">Violations 24h</div></div>
+</div>
+
+<div class="card">
+    <div class="card-title">Live agents<span class="spacer"></span><span class="muted mono" id="agents-updated"></span></div>
+    <div id="live-agents"><div class="empty-state">Loading…</div></div>
+</div>
+
+<div class="grid grid-2">
+    <div class="card">
+        <div class="card-title">Activity<span class="spacer"></span><span class="connection-badge" data-connection-badge>connecting</span></div>
+        <div class="feed" id="activity-feed"><div class="empty-state">Loading…</div></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Goals</div>
+        <div id="goals"><div class="empty-state">Loading…</div></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Upcoming schedules</div>
+        <div id="schedules"><div class="empty-state">Loading…</div></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Recent runs<span class="spacer"></span><a class="mono" href="/runs">all runs →</a></div>
+        <div id="recent-runs"><div class="empty-state">Loading…</div></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    "use strict";
+    const C = window.Conduction;
+    const esc = C.escapeHtml, pill = C.pill, fmtCost = C.fmtCost, fmtAgo = C.fmtAgo, encodeId = C.encodeId;
+
+    const MAX_FEED_ITEMS = 120;
+    const GOAL_PROJECT_CAP = 10;
+
+    function setText(id, value) { document.getElementById(id).textContent = value; }
+    function empty(message) { return '<div class="empty-state">' + esc(message) + '</div>'; }
+    function truncate(value, limit) {
+        const text = String(value === null || value === undefined ? "" : value);
+        return text.length > limit ? text.slice(0, limit - 1) + "…" : text;
+    }
+    function runLink(runId) {
+        return '<a class="mono" href="/runs/' + encodeId(runId) + '">' + esc(truncate(runId, 18)) + "</a>";
+    }
+
+    /* ---- KPI tiles ---- */
+    async function loadSummary() {
+        try {
+            const s = await C.fetchJson("/api/observe/summary");
+            setText("kpi-active-runs", s.active_runs != null ? s.active_runs : 0);
+            setText("kpi-live-agents", s.live_agents != null ? s.live_agents : 0);
+            setText("kpi-cost-today", fmtCost(s.cost_today_usd));
+            setText("kpi-cost-total", fmtCost(s.cost_total_usd));
+            const rate = s.gate_pass_rate_last_20;
+            setText("kpi-gate", rate === null || rate === undefined ? "n/a" : Math.round(rate * 100) + "%");
+            setText("kpi-violations", s.violations_24h != null ? s.violations_24h : 0);
+        } catch (err) {
+            setText("kpi-active-runs", "!");
+        }
+    }
+
+    /* ---- live agents table (3 s poll) ---- */
+    async function loadAgents() {
+        const host = document.getElementById("live-agents");
+        let agents;
+        try {
+            agents = await C.fetchJson("/api/observe/agents");
+        } catch (err) {
+            host.innerHTML = empty("Could not load agents: " + err.message);
+            return;
+        }
+        if (!Array.isArray(agents) || agents.length === 0) {
+            host.innerHTML = empty("No agents running. Launch a mission to put the fleet to work.");
+            document.getElementById("agents-updated").textContent = "";
+            return;
+        }
+        const rows = agents.map(function (a) {
+            const finding = a.last_finding
+                ? esc(a.last_finding.topic || "") + ": " + esc(truncate(a.last_finding.summary, 70))
+                : '<span class="muted">-</span>';
+            return "<tr>"
+                + "<td>" + runLink(a.run_id) + "</td>"
+                + "<td>" + esc(a.slug || "") + "</td>"
+                + '<td class="mono">' + esc(a.agent || "") + "</td>"
+                + '<td class="mono">' + esc(a.model || "") + "</td>"
+                + "<td>" + pill(a.status) + "</td>"
+                + '<td class="num">' + esc(a.turns != null ? a.turns : 0) + "</td>"
+                + '<td class="num">' + esc(fmtCost(a.cost_usd)) + "</td>"
+                + '<td><span class="truncate">' + finding + "</span></td>"
+                + '<td class="mono">' + esc(fmtAgo(a.last_event_ts)) + "</td>"
+                + "</tr>";
+        }).join("");
+        host.innerHTML = '<table class="table"><thead><tr>'
+            + "<th>Run</th><th>Mission</th><th>Agent</th><th>Model</th><th>Status</th>"
+            + '<th class="num">Turns</th><th class="num">Cost</th><th>Last finding</th><th>Age</th>'
+            + "</tr></thead><tbody>" + rows + "</tbody></table>";
+        document.getElementById("agents-updated").textContent = agents.length + " live";
+    }
+
+    /* ---- activity feed: timeline for first paint, then SSE ---- */
+    function feedItemHtml(row) {
+        const type = String(row.type || "");
+        let tone = "";
+        if (/violat|rejected/.test(type)) tone = " danger";
+        else if (type === "mission.completed") {
+            const status = String(row.status || row.summary || "").toLowerCase();
+            tone = /fail|error/.test(status) ? " failed" : " ok";
+        } else if (type.indexOf("finding") !== -1) tone = " info";
+        return '<div class="feed-item' + tone + '">'
+            + '<span class="feed-time mono">' + esc(fmtAgo(row.ts)) + "</span>"
+            + '<span class="badge">' + esc(type) + "</span>"
+            + '<span class="feed-text">' + esc(row.worker ? row.worker + " · " : "") + esc(truncate(row.summary, 110)) + "</span>"
+            + (row.run_id ? '<span class="mono">' + runLink(row.run_id) + "</span>" : "")
+            + "</div>";
+    }
+
+    async function initFeed() {
+        const host = document.getElementById("activity-feed");
+        try {
+            const rows = await C.fetchJson("/api/observe/timeline?limit=60");
+            const list = Array.isArray(rows) ? rows : (rows && rows.items) || [];
+            host.innerHTML = list.length
+                ? list.slice().reverse().map(feedItemHtml).join("")
+                : empty("Nothing has happened yet.");
+        } catch (err) {
+            host.innerHTML = empty("Activity unavailable: " + err.message);
+        }
+        C.openStream("/api/observe/feed", {
+            activity: function (row) {
+                if (!row || typeof row !== "object") return;
+                if (host.querySelector(".empty-state")) host.innerHTML = "";
+                host.insertAdjacentHTML("afterbegin", feedItemHtml(row));
+                while (host.children.length > MAX_FEED_ITEMS) host.removeChild(host.lastChild);
+            }
+        });
+    }
+
+    /* ---- goals across projects ---- */
+    async function loadGoals() {
+        const host = document.getElementById("goals");
+        let projects;
+        try {
+            projects = await C.fetchJson("/api/projects");
+        } catch (err) {
+            host.innerHTML = empty("Projects unavailable: " + err.message);
+            return;
+        }
+        if (!Array.isArray(projects) || projects.length === 0) {
+            host.innerHTML = empty("No projects registered yet.");
+            return;
+        }
+        const withOpenGoals = projects
+            .filter(function (p) { return p.goals && p.goals.open > 0; })
+            .slice(0, GOAL_PROJECT_CAP);
+        if (withOpenGoals.length === 0) {
+            host.innerHTML = empty("No open goals across " + projects.length + " project(s).");
+            return;
+        }
+        const docs = await Promise.all(withOpenGoals.map(function (p) {
+            return C.fetchJson("/api/projects/" + encodeId(p.repo_key))
+                .then(function (doc) { return { project: p, doc: doc }; })
+                .catch(function () { return { project: p, doc: null }; });
+        }));
+        const rows = [];
+        docs.forEach(function (entry) {
+            const goals = (entry.doc && entry.doc.goals) || [];
+            goals.filter(function (g) { return g.status === "open"; }).forEach(function (g) {
+                rows.push("<tr>"
+                    + '<td><a class="mono" href="/projects/' + encodeId(entry.project.repo_key) + '">'
+                        + esc(entry.project.name || entry.project.repo_key) + "</a></td>"
+                    + "<td>" + esc(truncate(g.title, 80)) + "</td>"
+                    + "<td>" + pill(g.status === "open" ? "pending" : g.status) + "</td>"
+                    + '<td class="mono">' + esc(fmtAgo(g.updated_at)) + "</td>"
+                    + "</tr>");
+            });
+        });
+        host.innerHTML = rows.length
+            ? '<table class="table"><thead><tr><th>Project</th><th>Goal</th><th>Status</th><th>Updated</th></tr></thead><tbody>'
+                + rows.join("") + "</tbody></table>"
+            : empty("No open goals.");
+    }
+
+    /* ---- upcoming schedules ---- */
+    async function loadSchedules() {
+        const host = document.getElementById("schedules");
+        let schedules;
+        try {
+            schedules = await C.fetchJson("/api/schedules");
+        } catch (err) {
+            host.innerHTML = empty("Schedules unavailable: " + err.message);
+            return;
+        }
+        if (!Array.isArray(schedules) || schedules.length === 0) {
+            host.innerHTML = empty("No schedules configured. Add one in Settings or on a project.");
+            return;
+        }
+        schedules.sort(function (a, b) {
+            const av = a.next_due ? Date.parse(a.next_due) : Infinity;
+            const bv = b.next_due ? Date.parse(b.next_due) : Infinity;
+            return av - bv;
+        });
+        const rows = schedules.map(function (s) {
+            return "<tr>"
+                + '<td class="mono">' + esc(s.id || "") + "</td>"
+                + "<td>" + esc(s.kind || "") + "</td>"
+                + '<td class="mono">' + esc(truncate(s.target_repo || s.source || "", 34)) + "</td>"
+                + "<td>" + esc(s.every || s.cron || "-") + "</td>"
+                + '<td class="mono">' + esc(s.next_due ? s.next_due.replace("T", " ").slice(0, 16) : "-") + "</td>"
+                + "<td>" + (s.enabled === false ? pill("pending") : pill("running")) + "</td>"
+                + '<td><button type="button" class="btn btn-ghost" data-run-now="' + esc(s.id) + '">Run now</button></td>'
+                + "</tr>";
+        }).join("");
+        host.innerHTML = '<table class="table"><thead><tr>'
+            + "<th>Id</th><th>Kind</th><th>Repo</th><th>Every</th><th>Next due</th><th>Enabled</th><th></th>"
+            + "</tr></thead><tbody>" + rows + "</tbody></table>";
+    }
+
+    document.getElementById("schedules").addEventListener("click", async function (event) {
+        const button = event.target.closest("[data-run-now]");
+        if (!button) return;
+        const id = button.getAttribute("data-run-now");
+        button.disabled = true;
+        button.textContent = "Starting…";
+        try {
+            const result = await C.fetchJson("/api/schedules/" + encodeId(id) + "/run-now", { method: "POST" });
+            button.textContent = "Started";
+            if (result && result.factory_run_id) window.location.href = "/factory";
+        } catch (err) {
+            button.disabled = false;
+            button.textContent = "Run now";
+            alert("Run now failed: " + err.message);
+        }
+    });
+
+    /* ---- recent runs ---- */
+    async function loadRuns() {
+        const host = document.getElementById("recent-runs");
+        let runs;
+        try {
+            runs = await C.fetchJson("/api/runs");
+        } catch (err) {
+            host.innerHTML = empty("Runs unavailable: " + err.message);
+            return;
+        }
+        const list = (Array.isArray(runs) ? runs : (runs && runs.runs) || []).slice(0, 8);
+        if (list.length === 0) {
+            host.innerHTML = empty("No runs yet. Launch your first mission.");
+            return;
+        }
+        const rows = list.map(function (r) {
+            return "<tr>"
+                + "<td>" + runLink(r.run_id || r.id) + "</td>"
+                + "<td>" + esc(truncate(r.slug || "", 28)) + "</td>"
+                + '<td class="mono">' + esc(truncate(r.repo_key || r.target_repo || "", 24)) + "</td>"
+                + "<td>" + pill(r.status) + "</td>"
+                + "<td>" + (r.gate_passed === true ? pill("passed") : (r.gate_passed === false ? pill("failed") : '<span class="muted">-</span>')) + "</td>"
+                + '<td class="num">' + esc(r.agents_failed != null ? r.agents_failed : 0) + "</td>"
+                + '<td class="mono">' + esc(fmtAgo(r.started_at || r.created_at || r.last_event_ts)) + "</td>"
+                + "</tr>";
+        }).join("");
+        host.innerHTML = '<table class="table"><thead><tr>'
+            + '<th>Run</th><th>Mission</th><th>Repo</th><th>Status</th><th>Gate</th><th class="num">Failed</th><th>Age</th>'
+            + "</tr></thead><tbody>" + rows + "</tbody></table>";
+    }
+
+    loadSummary();
+    loadAgents();
+    initFeed();
+    loadGoals();
+    loadSchedules();
+    loadRuns();
+    setInterval(loadAgents, 3000);
+    setInterval(loadSummary, 5000);
+    setInterval(loadSchedules, 60000);
+    setInterval(loadRuns, 15000);
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,376 @@
+{% extends "base.html" %}
+
+{% block title %}Project: {{ repo_key }}{% endblock %}
+
+{% block content %}
+<div class="page">
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h2 class="card-title" id="project-name">Loading...</h2>
+                <p class="muted mono" id="project-path"></p>
+            </div>
+            <a href="/projects" class="btn btn-ghost">← All Projects</a>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top: 1.5rem;">
+        <div class="tabs">
+            <button class="tab tab-active" data-tab="rules">Rules</button>
+            <button class="tab" data-tab="goals">Goals</button>
+            <button class="tab" data-tab="schedules">Schedules</button>
+            <button class="tab" data-tab="runs">Runs</button>
+        </div>
+
+        <div id="tab-rules" class="tab-content" style="display: block;">
+            <h3>Project Rules</h3>
+            <div id="rules-list"></div>
+            <button id="add-rule-btn" class="btn btn-primary" style="margin-top: 1rem;">Add Rule</button>
+
+            <div style="margin-top: 2rem; padding-top: 2rem; border-top: 1px solid var(--border);">
+                <h4>Effective Rules Preview</h4>
+                <p class="muted">Combined ecosystem + project rules as agents will see them</p>
+                <pre id="effective-rules" class="mono" style="background: var(--surface-2); padding: 1rem; border-radius: var(--radius); overflow-x: auto; max-height: 300px;"></pre>
+            </div>
+        </div>
+
+        <div id="tab-goals" class="tab-content" style="display: none;">
+            <h3>Project Goals</h3>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem;">
+                <div>
+                    <h4 style="margin-bottom: 0.5rem;">Open</h4>
+                    <div id="goals-open" class="goals-column"></div>
+                </div>
+                <div>
+                    <h4 style="margin-bottom: 0.5rem;">Done</h4>
+                    <div id="goals-done" class="goals-column"></div>
+                </div>
+                <div>
+                    <h4 style="margin-bottom: 0.5rem;">Blocked</h4>
+                    <div id="goals-blocked" class="goals-column"></div>
+                </div>
+            </div>
+            <button id="add-goal-btn" class="btn btn-primary" style="margin-top: 1rem;">Add Goal</button>
+        </div>
+
+        <div id="tab-schedules" class="tab-content" style="display: none;">
+            <h3>Schedules</h3>
+            <div id="schedules-table"></div>
+            <button id="add-schedule-btn" class="btn btn-primary" style="margin-top: 1rem;">Add Schedule</button>
+        </div>
+
+        <div id="tab-runs" class="tab-content" style="display: none;">
+            <h3>Runs for This Project</h3>
+            <div id="runs-table"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const REPO_KEY = {{ repo_key | tojson }};
+const { escapeHtml, fetchJson, pill, fmtAgo } = window.Conduction;
+
+let projectData = null;
+let effectiveRulesCache = null;
+
+function generateId() {
+    return Math.random().toString(36).substring(2, 8);
+}
+
+async function loadProject() {
+    try {
+        projectData = await fetchJson(`/api/projects/${encodeURIComponent(REPO_KEY)}`);
+        document.getElementById('project-name').textContent = projectData.name || REPO_KEY;
+        document.getElementById('project-path').textContent = projectData.target_repo || '';
+
+        renderRules();
+        loadEffectiveRules();
+    } catch (error) {
+        document.getElementById('project-name').textContent = `Error: ${error.message}`;
+    }
+}
+
+async function loadEffectiveRules() {
+    try {
+        const data = await fetchJson(`/api/rules/effective?target_repo=${encodeURIComponent(projectData.target_repo)}`);
+        effectiveRulesCache = data;
+        document.getElementById('effective-rules').textContent = data.rules_block || '(no rules enabled)';
+    } catch (error) {
+        document.getElementById('effective-rules').textContent = `Error: ${error.message}`;
+    }
+}
+
+function renderRules() {
+    const container = document.getElementById('rules-list');
+    const rules = projectData.rules || [];
+
+    if (rules.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>No rules defined</p></div>';
+        return;
+    }
+
+    let html = '<div style="display: flex; flex-direction: column; gap: 0.75rem;">';
+    rules.forEach((rule, idx) => {
+        html += '<div class="card" style="padding: 1rem;">';
+        html += `<div style="display: flex; gap: 1rem; align-items: start;">`;
+        html += `<input type="checkbox" ${rule.enabled ? 'checked' : ''} onchange="toggleRule(${idx})" style="margin-top: 0.25rem;">`;
+        html += `<div style="flex: 1;">`;
+        html += `<textarea id="rule-text-${idx}" rows="2" style="width: 100%; font-family: inherit; padding: 0.5rem; border: 1px solid var(--border); border-radius: var(--radius);">${escapeHtml(rule.text)}</textarea>`;
+        html += `<div style="margin-top: 0.5rem; display: flex; gap: 1rem; align-items: center;">`;
+        html += `<select id="rule-scope-${idx}" style="padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius);">`;
+        html += `<option value="all" ${rule.scope === 'all' ? 'selected' : ''}>All agents</option>`;
+        html += `<option value="writers" ${rule.scope === 'writers' ? 'selected' : ''}>Writers only</option>`;
+        html += `<option value="readers" ${rule.scope === 'readers' ? 'selected' : ''}>Readers only</option>`;
+        html += `</select>`;
+        html += `<button class="btn" onclick="updateRule(${idx})">Save</button>`;
+        html += `<button class="btn btn-danger" onclick="deleteRule(${idx})">Delete</button>`;
+        html += `</div></div></div></div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+async function toggleRule(idx) {
+    projectData.rules[idx].enabled = !projectData.rules[idx].enabled;
+    await saveProject();
+}
+
+async function updateRule(idx) {
+    projectData.rules[idx].text = document.getElementById(`rule-text-${idx}`).value;
+    projectData.rules[idx].scope = document.getElementById(`rule-scope-${idx}`).value;
+    await saveProject();
+}
+
+async function deleteRule(idx) {
+    if (!confirm('Delete this rule?')) return;
+    projectData.rules.splice(idx, 1);
+    await saveProject();
+}
+
+async function addRule() {
+    projectData.rules = projectData.rules || [];
+    projectData.rules.push({
+        id: generateId(),
+        text: 'New rule',
+        scope: 'all',
+        enabled: true
+    });
+    await saveProject();
+}
+
+function renderGoals() {
+    const goals = projectData.goals || [];
+    ['open', 'done', 'blocked'].forEach(status => {
+        const container = document.getElementById(`goals-${status}`);
+        const statusGoals = goals.filter(g => g.status === status);
+
+        if (statusGoals.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>No goals</p></div>';
+            return;
+        }
+
+        let html = '<div style="display: flex; flex-direction: column; gap: 0.5rem;">';
+        statusGoals.forEach(goal => {
+            html += '<div class="card" style="padding: 0.75rem; cursor: pointer;" onclick="editGoal(\'' + escapeHtml(goal.id) + '\')">';
+            html += `<strong>${escapeHtml(goal.title)}</strong>`;
+            if (goal.description) {
+                html += `<p class="muted" style="font-size: 0.9rem; margin-top: 0.25rem;">${escapeHtml(goal.description)}</p>`;
+            }
+            if (goal.linked_runs && goal.linked_runs.length > 0) {
+                html += `<div class="badge" style="margin-top: 0.5rem;">${goal.linked_runs.length} linked runs</div>`;
+            }
+            html += '</div>';
+        });
+        html += '</div>';
+        container.innerHTML = html;
+    });
+}
+
+function editGoal(goalId) {
+    const goal = projectData.goals.find(g => g.id === goalId);
+    if (!goal) return;
+
+    const newTitle = prompt('Goal title:', goal.title);
+    if (newTitle === null) return;
+
+    const newDesc = prompt('Description:', goal.description || '');
+    if (newDesc === null) return;
+
+    const newStatus = prompt('Status (open/done/blocked):', goal.status);
+    if (!['open', 'done', 'blocked'].includes(newStatus)) {
+        alert('Invalid status');
+        return;
+    }
+
+    goal.title = newTitle;
+    goal.description = newDesc;
+    goal.status = newStatus;
+    goal.updated_at = new Date().toISOString();
+
+    saveProject();
+}
+
+async function addGoal() {
+    const title = prompt('Goal title:');
+    if (!title) return;
+
+    const description = prompt('Description (optional):');
+
+    projectData.goals = projectData.goals || [];
+    projectData.goals.push({
+        id: generateId(),
+        title: title,
+        description: description || '',
+        status: 'open',
+        linked_runs: [],
+        updated_at: new Date().toISOString()
+    });
+
+    await saveProject();
+}
+
+async function renderSchedules() {
+    const container = document.getElementById('schedules-table');
+
+    try {
+        const allSchedules = await fetchJson('/api/schedules');
+        const projectSchedules = allSchedules.filter(s => s.target_repo === projectData.target_repo);
+
+        if (projectSchedules.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>No schedules</p></div>';
+            return;
+        }
+
+        let html = '<table class="table"><thead><tr>';
+        html += '<th>Kind</th><th>Frequency</th><th>Enabled</th><th>Last Run</th><th>Next Due</th><th>Actions</th>';
+        html += '</tr></thead><tbody>';
+
+        projectSchedules.forEach(sched => {
+            const freq = sched.every || sched.cron || '-';
+            const lastRun = sched.last_run_at ? new Date(sched.last_run_at).toLocaleString() : 'Never';
+            const nextDue = sched.next_due ? new Date(sched.next_due).toLocaleString() : '-';
+
+            html += '<tr>';
+            html += `<td>${pill(sched.kind)}</td>`;
+            html += `<td class="mono">${escapeHtml(freq)}</td>`;
+            html += `<td>${sched.enabled ? '✓' : '✗'}</td>`;
+            html += `<td class="muted">${escapeHtml(lastRun)}</td>`;
+            html += `<td>${escapeHtml(nextDue)}</td>`;
+            html += `<td><button class="btn" onclick="runScheduleNow('${escapeHtml(sched.id)}')">Run Now</button></td>`;
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (error) {
+        container.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+    }
+}
+
+async function runScheduleNow(schedId) {
+    if (!confirm('Run this schedule now?')) return;
+
+    try {
+        const result = await fetchJson(`/api/schedules/${encodeURIComponent(schedId)}/run-now`, {
+            method: 'POST'
+        });
+        alert(`Launched factory run: ${result.factory_run_id}`);
+        renderSchedules();
+    } catch (error) {
+        alert(`Error: ${error.message}`);
+    }
+}
+
+async function addSchedule() {
+    alert('Schedule creation UI coming soon - edit project.json directly for now');
+}
+
+async function loadRuns() {
+    const container = document.getElementById('runs-table');
+
+    try {
+        const allRuns = await fetchJson('/api/runs');
+        const projectRuns = allRuns.filter(r => r.target_repo === projectData.target_repo);
+
+        if (projectRuns.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>No runs yet</p></div>';
+            return;
+        }
+
+        let html = '<table class="table"><thead><tr>';
+        html += '<th>Run ID</th><th>Status</th><th>Started</th><th>Cost</th>';
+        html += '</tr></thead><tbody>';
+
+        projectRuns.slice(0, 50).forEach(run => {
+            const started = run.started_at ? fmtAgo(run.started_at) : '-';
+            const cost = run.cost_usd != null ? `$${run.cost_usd.toFixed(4)}` : '-';
+
+            html += '<tr>';
+            html += `<td><a href="/runs/${encodeURIComponent(run.run_id)}" class="mono">${escapeHtml(run.run_id)}</a></td>`;
+            html += `<td>${pill(run.status)}</td>`;
+            html += `<td class="muted">${escapeHtml(started)}</td>`;
+            html += `<td>${escapeHtml(cost)}</td>`;
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (error) {
+        container.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+    }
+}
+
+async function saveProject() {
+    try {
+        await fetchJson(`/api/projects/${encodeURIComponent(REPO_KEY)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(projectData)
+        });
+        await loadProject();
+    } catch (error) {
+        alert(`Error saving: ${error.message}`);
+    }
+}
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        const tabName = tab.dataset.tab;
+
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('tab-active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+
+        tab.classList.add('tab-active');
+        document.getElementById(`tab-${tabName}`).style.display = 'block';
+
+        if (tabName === 'goals' && projectData) renderGoals();
+        if (tabName === 'schedules') renderSchedules();
+        if (tabName === 'runs') loadRuns();
+    });
+});
+
+// Button handlers
+document.getElementById('add-rule-btn').addEventListener('click', addRule);
+document.getElementById('add-goal-btn').addEventListener('click', addGoal);
+document.getElementById('add-schedule-btn').addEventListener('click', addSchedule);
+
+// Global functions for inline handlers
+window.toggleRule = toggleRule;
+window.updateRule = updateRule;
+window.deleteRule = deleteRule;
+window.editGoal = editGoal;
+window.runScheduleNow = runScheduleNow;
+
+// Load on ready
+loadProject();
+</script>
+
+<style>
+.goals-column {
+    min-height: 100px;
+}
+</style>
+{% endblock %}

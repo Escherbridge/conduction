@@ -78,12 +78,63 @@ cd C:\Users\atooz\Programming\conduction && \
 
 The orchestrator's gate, after all agents finish, runs this suite plus HTTP probes on `/api/runs`, `/runs`, `/query`, `/api/query/costs`, `/api/query/claims/conflicts` on a dedicated port.
 
-## New Routes (Contract Item 4)
+## Policy Data (Wave L)
 
-Four new endpoints are being implemented to support manifests and replay:
-- **GET /api/runs/<id>/manifest**: Return the manifest JSON (404 if missing). app.py and sqlite_sink.py.
-- **GET /api/runs/<id>/story**: Return narrated run as text/markdown. Uses `narrate_path(run.jsonl)` in asyncio.to_thread.
-- **POST /api/runs/<id>/replay**: Creates a replay run from the manifest, runs it ($0 cost), returns `{run_id, slug, parent_run_id}`. Creates `.agentgraph/runs/<slug>-replay-<unix ts>/`, 409 if running, 400 if no manifest.
-- **DELETE /api/runs/<id>**: Removes the run dir and its SQLite mirror rows (SqliteMirror.delete_run). 204 if successful, 409 if running.
+**Ecosystem scope** (`<conduction>/.agentgraph/ecosystem.json`): Global rules, goals, and schedules. Loaded by app.py on start.
 
-Run list items and detail views gain "kind" (manifest, or "legacy" when absent) and "parent_run_id" badge ("$0 replay of <parent>").
+**Project scope** (`<target_repo>/.agentgraph/project.json`): Per-repo rules, goals, and schedules. Versioned in the target repo (manifest.AGENTGRAPH_GITIGNORE gains `!project.json` and `!ecosystem.json`).
+
+**Schema v1** (policy.py:1–40):
+- `Rule`: {id, text, scope ("all"|"writers"|"readers"), enabled}
+- `Goal`: {id, title, description, status ("open"|"done"|"blocked"), linked_runs, updated_at}
+- `Schedule`: {id, kind ("factory"|"mission"), factory_path, every ("30m"|"6h"|"1d")|null, cron, enabled, last_run_at, last_factory_run_id, target_repo (ecosystem only)}
+
+**Policy API** (policy.py: `load_ecosystem`, `save_ecosystem`, `load_project`, `save_project`, `validate_ecosystem`, `validate_project`, `effective_rules`, `rules_block`, `apply_rules`, `rules_fact`, `next_due`, `due_schedules`). Atomic writes via temp+replace. `effective_rules(ecosystem, project) → list[Rule]` (enabled, ecosystem first). `rules_block(rules, *, writer: bool) → str` renders a "RULES (binding)" section for agent briefs. `apply_rules(specs, rules)` prepends binding rules to each brief (idempotent marker: "RULES (binding)"); writers = specs with Edit/Write tools.
+
+## Routes and Blueprints (Wave L)
+
+**Sanic blueprints** (routes/): Each blueprint registers via app.py; reaches shared state ONLY via `request.app.ctx` (mirror, mirror_lock, mission_processes, factory_processes). No module-level imports of app — lazy import inside handlers to avoid circular dependencies.
+
+**routes/config.py** (bp "config"): Ecosystem config (GET/PUT /api/ecosystem), project registry (GET/POST /api/projects), project detail (GET/PUT /api/projects/<repo_key>), schedules (GET /api/schedules, POST /api/schedules/<id>/run-now), merged rules (GET /api/rules/effective?target_repo=...).
+
+**routes/observe.py** (bp "observe"): Fleet observability (GET /api/observe/summary → KPIs), live agents (GET /api/observe/agents → [{run_id, slug, target_repo, agent, model, status, turns, cost_usd, last_finding, last_event_ts}]), activity feed (GET /api/observe/feed → Server-Sent Events), timeline (GET /api/observe/timeline?limit=200 → recent activity rows).
+
+**routes/scheduler.py**: `start_scheduler(app)` registered on `after_server_start`. Async task fires every 60 s, computes `due_schedules(ecosystem, projects, now) → list[(schedule, target_repo)]`, launches factory runs (honoring CONDUCTION_DRY_RUN), updates `last_run_at` and `last_factory_run_id` in the owning doc. Skips if that repo already has a running factory. Sets `app.ctx.scheduler_state = {last_tick, launched}`. Disabled when env `CONDUCTION_SCHEDULER=0` (tests set this unless testing the scheduler).
+
+## Templating and Design System (Wave L)
+
+**Jinja2 setup** (app.py: `render_template`): Environment with FileSystemLoader(templates), autoescape=True.
+
+**templates/base.html**: Root shell. Every page `{% extends "base.html" %}` with blocks `title`, `content`, `scripts`. Sets `<html data-theme="dark">`, includes `/static/css/styles.css` and `/static/js/app.js`, marks active nav item via `{{ active }}`.
+
+**Static design tokens** (static/css/styles.css, rewritten by shell agent; no other agent adds to it): CSS custom properties on `:root` (dark) and `[data-theme="light"]`: `--bg`, `--surface`, `--surface-2`, `--border`, `--text`, `--text-muted`, `--accent`, `--ok`, `--warn`, `--danger`, `--info`, `--mono`, `--radius`. Component classes: `.app-shell`, `.sidebar`, `.topbar`, `.page`, `.card`, `.kpi`, `.pill` (with status variants), `.table`, `.form-grid`, `.field`, `.btn`, `.tabs`, `.feed`, `.empty-state`, `.badge`, `.mono`. Status colors: running=warn(amber), completed/passed=ok(green), failed/errored=danger(red), stale/pending=muted, replay/info=info(blue), skipped=muted. Grep existing selectors (`swim-lane`, `timeline-event.*`, `mission-completion-pill`, `run-status.*`, etc.) before rewriting and keep or alias them.
+
+**Shared JS** (static/js/app.js): `window.Conduction = { escapeHtml, fetchJson(url, opts), openStream(url, handlers), pill(status), fmtCost(n), fmtAgo(iso), encodeId(id) }`.
+
+## Observability and Information Architecture (Wave L)
+
+**Dashboard** (/): Fleet KPIs, live agents across all runs, activity feed, goals, upcoming schedules.
+
+**Runs** (/runs): Every run from every project. Detail at /runs/<id> with swim lanes, story, manifest views.
+
+**Factory** (/factory): Factory runs and pipeline view; launch a factory.
+
+**Launch** (/launch): Launch a single mission.
+
+**Projects** (/projects): Registered target repos. /projects/<repo_key> shows rules, goals, schedules, runs.
+
+**Query** (/query): Cross-run trace queries.
+
+**Settings** (/settings): Ecosystem-wide rules, goals, schedules; SDK availability; dry-run flag.
+
+**Top bar**: Page title, "dry-run mode" badge (when CONDUCTION_DRY_RUN=1), "N agents live" counter (polls /api/observe/summary every 5 s), theme toggle (dark default, light tokens).
+
+## Install and Launch Scripts (Wave L)
+
+**install.ps1 / install.sh** (repo root): Create ./venv if missing (prefer `uv venv` + `uv pip install`, fall back to `python -m venv + pip`). Install requirements.txt + requirements-dev.txt. Verify `import app`. Print next steps. Idempotent.
+
+**conduction.ps1 / conduction.cmd / conduction.sh**: If http://127.0.0.1:$PORT/api/ping already answers → open browser. Else start `venv\Scripts\python app.py` (CONDUCTION_PORT honoured, default 8000) detached with logs in `.agentgraph/app.log`. Wait for /api/ping (30 s timeout), open browser. `-NoBrowser` flag. Never kills by name.
+
+**scripts/create-shortcut.ps1**: Creates "Conduction.lnk" on Desktop and Start Menu Programs, targeting `powershell.exe -NoProfile -ExecutionPolicy Bypass -File conduction.ps1`, working dir = repo root, icon from shell32.dll. `-Remove` to delete. install.ps1 offers to run it (`-Shortcut` switch runs non-interactively).
+
+**README.md**: 60-second quickstart (install, launch, shortcut), each page's role, data locations (.agentgraph/, mirror db), env vars (CONDUCTION_PORT, CONDUCTION_DRY_RUN, CONDUCTION_ALLOWED_ROOTS, CONDUCTION_SCHEDULER), how to run tests.

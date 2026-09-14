@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import hashlib
 import json as stdlib_json
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote
+from jinja2 import Environment, FileSystemLoader
 from sanic import Sanic
 from sanic.response import html, json as sanic_json, raw as _raw, text as raw_text, empty as empty_response
 from datastar_py import ServerSentEventGenerator as SSE
@@ -28,6 +30,7 @@ from agentgraph.manifest import (
     write_mission_manifest,
 )
 from agentgraph.narrate import narrate_path
+from agentgraph import policy
 from agentgraph.factory import (
     FactoryRunner,
     load_factory_spec,
@@ -35,6 +38,9 @@ from agentgraph.factory import (
 )
 
 APP_ROOT = Path(__file__).resolve().parent
+# Where ecosystem.json lives; tests point this at a temp dir so they never
+# write rules into the real one.
+ECOSYSTEM_ROOT = Path(os.environ.get("CONDUCTION_ECOSYSTEM_ROOT") or APP_ROOT).resolve()
 KNOWN_REPOS_PATH = APP_ROOT / ".agentgraph" / "known_repos.json"
 MIRROR_DB_PATH = APP_ROOT / ".agentgraph" / "missions.db"
 
@@ -49,6 +55,12 @@ TERMINAL_RUN_STATUSES = ("completed", "failed", "errored", "stale")
 # so its stream can end instead of polling until the 2 h cap.
 STALE_RUN_SECONDS = 600
 DEFAULT_MISSION_MODEL = "claude-sonnet-4-5-20250929"
+
+# Blueprint handlers do `from app import ...` lazily. When app.py is executed
+# as a script this module is "__main__", so that import would re-execute the
+# file and build a second Sanic instance with the same name; aliasing it here
+# makes both names one module object.
+sys.modules.setdefault("app", sys.modules[__name__])
 
 app = Sanic("ConductionApp")
 # Sanic hands path params over still percent-encoded; run ids contain "@".
@@ -270,6 +282,54 @@ def join_mission_threads(threads: list[threading.Thread], timeout_seconds: float
         thread.join(remaining)
 
 
+def effective_policy_rules(target_repo: Path) -> list[dict]:
+    """Enabled ecosystem rules first, then the target repo's own -- the binding set."""
+    try:
+        ecosystem = policy.load_ecosystem(ECOSYSTEM_ROOT)
+        project = policy.load_project(target_repo)
+        return list(policy.effective_rules(ecosystem, project))
+    except Exception as error:  # config problems must not block a launch
+        print("Could not resolve rules for %s: %s" % (target_repo, error))
+        return []
+
+
+def apply_policy_rules(agents: list[AgentSpec], rules: list[dict]) -> list[AgentSpec]:
+    """Prepend the RULES (binding) block to every brief (idempotent)."""
+    if not rules:
+        return agents
+    return list(policy.apply_rules(agents, rules))
+
+
+def rules_facts(rules: list[dict]) -> list[tuple]:
+    """The single seeded fact carrying the binding rules, or nothing."""
+    if not rules:
+        return []
+    fact = policy.rules_fact(rules)
+    return [fact] if fact else []
+
+
+# --- blueprints ------------------------------------------------------------
+# Imported after the helpers above exist: blueprint handlers `from app import`
+# them lazily at request time, never at module import.
+from routes.config import bp as config_bp  # noqa: E402
+from routes.scheduler import start_scheduler  # noqa: E402
+
+app.blueprint(config_bp)
+
+try:  # observe.py is a sibling wave-L deliverable; the app boots without it
+    from routes.observe import bp as observe_bp  # noqa: E402
+
+    app.blueprint(observe_bp)
+except ImportError as error:  # pragma: no cover - only while observe.py lands
+    print("routes.observe unavailable: %s" % error)
+
+
+@app.after_server_start
+async def setup_scheduler(app):
+    """Start the 60 s schedule ticker (disabled by CONDUCTION_SCHEDULER=0)."""
+    start_scheduler(app)
+
+
 @app.before_server_start
 async def setup_mirror(app):
     """Initialize the SqliteMirror instance and mission process tracker on app.ctx"""
@@ -298,27 +358,77 @@ async def stop_missions(app):
         await asyncio.to_thread(join_mission_threads, threads, MISSION_JOIN_TIMEOUT_SECONDS)
 
 
-def render_template(filename: str) -> str:
-    path = APP_ROOT / "templates" / filename
-    return path.read_text(encoding="utf-8")
+environment = Environment(loader=FileSystemLoader(APP_ROOT / "templates"), autoescape=True)
+
+
+def dry_run_enabled() -> bool:
+    return os.environ.get("CONDUCTION_DRY_RUN") == "1"
+
+
+def render_template(name: str, **context) -> str:
+    """Render templates/<name> with the shell context every page needs.
+
+    Templates that contain no Jinja syntax render unchanged, so raw pages keep
+    working until the template agents convert them.
+    """
+    return environment.get_template(name).render(
+        active=context.pop("active", None),
+        dry_run=dry_run_enabled(),
+        **context,
+    )
+
+
+FALLBACK_PAGE = (
+    "<!DOCTYPE html><html data-theme=\"dark\"><head><title>%s</title></head>"
+    "<body><h1>%s</h1></body></html>"
+)
+
+
+def render_page(name: str, *, title: str, **context) -> str:
+    """render_template, but a page whose template has not landed yet still 200s."""
+    if not (APP_ROOT / "templates" / name).exists():
+        return FALLBACK_PAGE % (title, title)
+    return render_template(name, **context)
 
 
 @app.get("/")
 async def home(request):
     """Serves the main app"""
-    return html(render_template("index.html"))
+    return html(render_template("index.html", active="dashboard"))
 
 
 @app.get("/runs")
 async def runs_list(request):
     """Serves the runs list view"""
-    return html(render_template("runs_list.html"))
+    return html(render_template("runs_list.html", active="runs"))
 
 
 @app.get("/runs/<run_id:runid>")
 async def run_detail(request, run_id: str):
     """Serves the run detail view"""
-    return html(render_template("run_detail.html"))
+    return html(render_template("run_detail.html", active="runs", run_id=run_id))
+
+
+@app.get("/projects")
+async def projects_page(request):
+    """Registered target repos."""
+    return html(render_page("projects.html", title="Projects", active="projects"))
+
+
+@app.get("/projects/<key:str>")
+async def project_detail_page(request, key: str):
+    """One project: its rules, goals, schedules and runs."""
+    return html(
+        render_page(
+            "project_detail.html", title="Project", active="projects", repo_key=key
+        )
+    )
+
+
+@app.get("/settings")
+async def settings_page(request):
+    """Ecosystem-wide rules, goals, schedules; SDK availability; dry-run flag."""
+    return html(render_page("settings.html", title="Settings", active="settings"))
 
 
 def read_run_manifests(refs: list[RunRef]) -> dict[str, dict]:
@@ -338,7 +448,8 @@ async def list_runs(request):
     manifests = await asyncio.to_thread(read_run_manifests, refs)
     rows = await fetch_rows(
         request.app,
-        "SELECT run_id, slug, started_at, status, target_repo FROM runs ORDER BY started_at DESC",
+        "SELECT run_id, slug, started_at, status, target_repo, gate_passed, agents_failed "
+        "FROM runs ORDER BY started_at DESC",
     )
     runs = [
         {
@@ -349,6 +460,8 @@ async def list_runs(request):
             "target_repo": row[4],
             "kind": (manifests.get(row[0]) or {}).get("kind", "legacy"),
             "parent_run_id": (manifests.get(row[0]) or {}).get("parent_run_id"),
+            "gate_passed": None if row[5] is None else bool(row[5]),
+            "agents_failed": row[6],
         }
         for row in rows
     ]
@@ -568,6 +681,7 @@ async def replay_run(request, run_id: str):
             target_repo=manifest.get("target_repo", str(target_repo)),
             kind="replay",
             parent_run_id=run_id,
+            facts=manifest.get("facts") or [],
         )
         await asyncio.to_thread(write_mission_manifest, replay_dir, replay_manifest)
 
@@ -726,6 +840,7 @@ def write_run_manifest(
     target_repo: Path,
     kind: str,
     parent_run_id: str | None = None,
+    facts: list[tuple] = (),
 ) -> dict:
     """Build and persist mission.json so the run can replay/narrate itself later."""
     manifest = manifest_from_request(
@@ -739,6 +854,7 @@ def write_run_manifest(
         target_repo=str(target_repo),
         kind=kind,
         parent_run_id=parent_run_id,
+        facts=facts,
     )
     write_mission_manifest(run_dir, manifest)
     return manifest
@@ -798,7 +914,7 @@ async def list_sdks(request):
 @app.get("/launch")
 async def launch_page(request):
     """Serves the mission launch form"""
-    return html(render_template("launch.html"))
+    return html(render_template("launch.html", active="launch"))
 
 
 @app.post("/api/runs")
@@ -841,7 +957,8 @@ async def launch_mission(request):
         if sdk_error:
             return sanic_json({"error": sdk_error}, status=400)
 
-        agents = build_agent_specs(agent_data)
+        rules = effective_policy_rules(target_repo)
+        agents = apply_policy_rules(build_agent_specs(agent_data), rules)
 
         gate_spec = body.get("gate")
         gate, gate_error = resolve_mission_gate(gate_spec, target_repo, agents)
@@ -887,6 +1004,7 @@ async def launch_mission(request):
             max_concurrency=max_concurrency,
             transcript_dir=str(run_dir / "transcripts"),
             gate=gate,
+            facts=rules_facts(rules),
         )
 
         worker, worker_error = resolve_mission_worker(run_dir, agents)
@@ -905,6 +1023,7 @@ async def launch_mission(request):
             max_concurrency=max_concurrency,
             target_repo=target_repo,
             kind="mission",
+            facts=rules_facts(rules),
         )
 
         stop_event = threading.Event()
@@ -1034,6 +1153,8 @@ async def resume_mission(request, run_id: str):
         merged_agents = build_agent_specs(merged_specs)
 
         target_repo = ref.target_repo
+        rules = effective_policy_rules(target_repo)
+        merged_agents = apply_policy_rules(merged_agents, rules)
         resume_suffix = f"-resume-{int(time.time())}"
         resume_slug = f"{ref.slug[: 64 - len(resume_suffix)]}{resume_suffix}"
         resume_slug, slug_error = validate_slug(resume_slug)
@@ -1075,6 +1196,7 @@ async def resume_mission(request, run_id: str):
             max_concurrency=max_concurrency,
             transcript_dir=str(resume_dir / "transcripts"),
             gate=gate,
+            facts=rules_facts(rules),
         )
 
         worker, worker_error = resolve_mission_worker(resume_dir, merged_agents)
@@ -1097,6 +1219,7 @@ async def resume_mission(request, run_id: str):
             target_repo=target_repo,
             kind="resume",
             parent_run_id=run_id,
+            facts=rules_facts(rules),
         )
 
         stop_event = threading.Event()
@@ -1218,7 +1341,14 @@ def factory_worker_factory(run_dir: Path, specs):
     return None
 
 
-def start_factory_thread(app, spec, target_repo: Path, factory_run_id: str, start_wave: int) -> dict:
+def start_factory_thread(
+    app,
+    spec,
+    target_repo: Path,
+    factory_run_id: str,
+    start_wave: int,
+    rules: list[dict] | None = None,
+) -> dict:
     """Bounded-thread + stop_event launch, mirroring launch_mission."""
     stop_event = threading.Event()
     entry = {
@@ -1235,6 +1365,7 @@ def start_factory_thread(app, spec, target_repo: Path, factory_run_id: str, star
         worker_factory=factory_worker_factory,
         model=DEFAULT_MISSION_MODEL,
         stop_when=stop_event.is_set,
+        rules=list(rules or ()),
     )
 
     def run_factory_thread():
@@ -1265,7 +1396,7 @@ async def factory_page(request):
     template_path = APP_ROOT / "templates" / "factory.html"
     if not template_path.exists():
         return html("<!doctype html><html><body><h1>Factory</h1></body></html>")
-    return html(render_template("factory.html"))
+    return html(render_template("factory.html", active="factory"))
 
 
 @app.get("/api/factory/spec")
@@ -1327,7 +1458,14 @@ async def launch_factory(request):
 
         factory_run_id = "%s-%d" % (spec.slug, int(time.time()))
         state_path = target_repo / ".agentgraph" / "factory-runs" / factory_run_id / "state.json"
-        start_factory_thread(request.app, spec, target_repo, factory_run_id, 0)
+        start_factory_thread(
+            request.app,
+            spec,
+            target_repo,
+            factory_run_id,
+            0,
+            rules=effective_policy_rules(target_repo),
+        )
 
         return sanic_json(
             {
@@ -1426,7 +1564,14 @@ async def resume_factory(request, factory_run_id: str):
                 break
         start_wave = max(0, min(start_wave, len(spec.waves) - 1))
 
-        start_factory_thread(request.app, spec, target_repo, factory_run_id, start_wave)
+        start_factory_thread(
+            request.app,
+            spec,
+            target_repo,
+            factory_run_id,
+            start_wave,
+            rules=effective_policy_rules(target_repo),
+        )
         return sanic_json(
             {
                 "factory_run_id": factory_run_id,
@@ -1443,7 +1588,7 @@ async def resume_factory(request, factory_run_id: str):
 @app.get("/query")
 async def query_page(request):
     """Serves the cross-run query UI"""
-    return html(render_template("query.html"))
+    return html(render_template("query.html", active="query"))
 
 
 @app.get("/api/query/findings")

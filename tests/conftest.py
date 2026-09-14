@@ -66,6 +66,10 @@ def app_server_factory(tmp_path):
         # Build environment
         env = os.environ.copy()
         env["CONDUCTION_PORT"] = str(port)
+        # Isolate per-test: never touch conduction's real ecosystem.json, never
+        # let the scheduler launch factories under a test unless asked.
+        env.setdefault("CONDUCTION_ECOSYSTEM_ROOT", str(tmp_path))
+        env.setdefault("CONDUCTION_SCHEDULER", "0")
         if env_overrides:
             env.update(env_overrides)
 

@@ -324,7 +324,7 @@ def _make_owns_check(
         try:
             # Get changed files from git
             proc = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "-uall"],
                 cwd=cwd,
                 capture_output=True,
                 text=True,

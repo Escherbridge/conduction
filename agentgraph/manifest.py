@@ -17,7 +17,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from agentgraph.mission import READ_TOOLS, AgentSpec, Mission
 
@@ -26,7 +26,9 @@ SCHEMA_VERSION = 1
 DEFAULT_SDK = "claude"
 # Run artifacts never dirty the host repo, but the factory spec is source and
 # must stay versioned -- hence the negations.
-AGENTGRAPH_GITIGNORE = "*\n!.gitignore\n!factory.json\n"
+AGENTGRAPH_GITIGNORE = (
+    "*\n!.gitignore\n!factory.json\n!project.json\n!ecosystem.json\n"
+)
 
 
 def ensure_agentgraph_gitignore(target_repo: Path) -> Path:
@@ -81,6 +83,7 @@ def manifest_from_request(
     target_repo: str,
     kind: str = "mission",
     parent_run_id: Optional[str] = None,
+    facts: Sequence[Sequence[Any]] = (),
 ) -> dict:
     """Build the manifest dict for a launch/resume/replay/factory-wave run."""
     return {
@@ -90,6 +93,9 @@ def manifest_from_request(
         "agents": [_normalize_agent(a) for a in agents],
         "synthesis": synthesis,
         "gate": gate,
+        # Seeded board facts (e.g. the binding rules) are part of the recorded
+        # event stream; a rebuild without them cannot replay byte-identically.
+        "facts": [list(fact) for fact in facts],
         "model": model,
         "max_turns": max_turns,
         "max_concurrency": max_concurrency,
@@ -143,6 +149,7 @@ def mission_from_manifest(
         max_concurrency=manifest.get("max_concurrency", 4),
         transcript_dir=str(run_dir / "transcripts"),
         gate=gate_callable,
+        facts=[tuple(fact) for fact in manifest.get("facts") or []],
     )
 
 

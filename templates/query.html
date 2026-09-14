@@ -1,12 +1,9 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cross-Run Query - Conduction</title>
-    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
-    <link rel="stylesheet" href="/static/css/styles.css">
-    <style>
+{% extends "base.html" %}
+
+{% block title %}Query{% endblock %}
+
+{% block content %}
+<style>
         .query-section {
             margin: 2rem 0;
             padding: 1.5rem;
@@ -82,19 +79,10 @@
             color: #d35400;
             font-weight: 600;
         }
-    </style>
-</head>
-<body>
-    <div id="app-root">
-        <header>
-            <h1>Conduction</h1>
-            <p>Cross-Run Query Engine</p>
-            <nav>
-                <a href="/">Home</a> | <a href="/runs">Runs</a>
-            </nav>
-        </header>
-        <main id="main-content">
-            <!-- Findings Query -->
+</style>
+
+<div class="page">
+    <!-- Findings Query -->
             <div class="query-section">
                 <h3>🔍 Search Findings</h3>
                 <form class="search-form" id="findings-form">
@@ -117,12 +105,15 @@
                 <h3>⚠️ Claim Conflicts</h3>
                 <div id="conflicts-container" class="loading">Loading claim conflicts...</div>
             </div>
-        </main>
-    </div>
+</div>
+{% endblock %}
 
-    <script>
-        // Findings search
-        document.getElementById('findings-form').addEventListener('submit', async (e) => {
+{% block scripts %}
+<script>
+    const { escapeHtml, fetchJson } = window.Conduction;
+
+    // Findings search
+    document.getElementById('findings-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const text = document.getElementById('text-filter').value;
             const worker = document.getElementById('worker-filter').value;
@@ -137,8 +128,7 @@
             container.innerHTML = '<div class="loading">Searching...</div>';
 
             try {
-                const response = await fetch(`/api/query/findings?${params}`);
-                const findings = await response.json();
+                const findings = await fetchJson(`/api/query/findings?${params}`);
 
                 if (findings.length === 0) {
                     container.innerHTML = '<div class="empty-state">No findings matched your query</div>';
@@ -146,7 +136,7 @@
                 }
 
                 container.innerHTML = `
-                    <table>
+                    <table class="table">
                         <thead>
                             <tr>
                                 <th>Run ID</th>
@@ -159,19 +149,19 @@
                         <tbody>
                             ${findings.map(f => `
                                 <tr>
-                                    <td><a href="/runs/${f.run_id}">${f.run_id}</a></td>
-                                    <td>${f.slug || '-'}</td>
-                                    <td>${f.worker}</td>
-                                    <td>${f.topic}</td>
-                                    <td>${f.summary}</td>
+                                    <td class="mono"><a href="/runs/${escapeHtml(f.run_id)}">${escapeHtml(f.run_id)}</a></td>
+                                    <td>${escapeHtml(f.slug || '-')}</td>
+                                    <td>${escapeHtml(f.worker)}</td>
+                                    <td>${escapeHtml(f.topic)}</td>
+                                    <td>${escapeHtml(f.summary)}</td>
                                 </tr>
                             `).join('')}
                         </tbody>
                     </table>
-                    <p style="margin-top: 1rem; color: #666; font-size: 0.9rem;">Found ${findings.length} result(s)</p>
+                    <p class="muted" style="margin-top: 1rem; font-size: 0.9rem;">Found ${findings.length} result(s)</p>
                 `;
             } catch (error) {
-                container.innerHTML = `<div class="empty-state">Error: ${error.message}</div>`;
+                container.innerHTML = `<div class="empty-state">Error: ${escapeHtml(error.message)}</div>`;
             }
         });
 
@@ -179,8 +169,7 @@
         window.addEventListener('DOMContentLoaded', async () => {
             // Load costs
             try {
-                const response = await fetch('/api/query/costs');
-                const data = await response.json();
+                const data = await fetchJson('/api/query/costs');
                 const container = document.getElementById('costs-container');
 
                 if (data.by_run.length === 0 && data.by_agent.length === 0) {
@@ -190,7 +179,7 @@
 
                 container.innerHTML = `
                     <h4>By Run</h4>
-                    <table>
+                    <table class="table">
                         <thead>
                             <tr>
                                 <th>Run ID</th>
@@ -202,9 +191,9 @@
                         <tbody>
                             ${data.by_run.map(r => `
                                 <tr>
-                                    <td><a href="/runs/${r.run_id}">${r.run_id}</a></td>
-                                    <td>${r.slug || '-'}</td>
-                                    <td class="cost-value">$${(r.total_cost_usd || 0).toFixed(4)}</td>
+                                    <td class="mono"><a href="/runs/${escapeHtml(r.run_id)}">${escapeHtml(r.run_id)}</a></td>
+                                    <td>${escapeHtml(r.slug || '-')}</td>
+                                    <td class="mono cost-value">$${(r.total_cost_usd || 0).toFixed(4)}</td>
                                     <td>${r.total_turns || 0}</td>
                                 </tr>
                             `).join('')}
@@ -212,7 +201,7 @@
                     </table>
 
                     <h4 style="margin-top: 2rem;">By Agent Name (across all runs)</h4>
-                    <table>
+                    <table class="table">
                         <thead>
                             <tr>
                                 <th>Agent Name</th>
@@ -224,8 +213,8 @@
                         <tbody>
                             ${data.by_agent.map(a => `
                                 <tr>
-                                    <td>${a.agent_name}</td>
-                                    <td class="cost-value">$${(a.total_cost_usd || 0).toFixed(4)}</td>
+                                    <td>${escapeHtml(a.agent_name)}</td>
+                                    <td class="mono cost-value">$${(a.total_cost_usd || 0).toFixed(4)}</td>
                                     <td>${a.total_turns || 0}</td>
                                     <td>${a.run_count}</td>
                                 </tr>
@@ -235,7 +224,7 @@
                 `;
             } catch (error) {
                 document.getElementById('costs-container').innerHTML =
-                    `<div class="empty-state">Error loading costs: ${error.message}</div>`;
+                    `<div class="empty-state">Error loading costs: ${escapeHtml(error.message)}</div>`;
             }
 
             // Load conflicts
@@ -276,9 +265,8 @@
                 `;
             } catch (error) {
                 document.getElementById('conflicts-container').innerHTML =
-                    `<div class="empty-state">Error loading conflicts: ${error.message}</div>`;
+                    `<div class="empty-state">Error loading conflicts: ${escapeHtml(error.message)}</div>`;
             }
         });
     </script>
-</body>
-</html>
+{% endblock %}
