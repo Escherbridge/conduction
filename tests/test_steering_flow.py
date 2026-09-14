@@ -81,7 +81,9 @@ def test_launch_and_complete(app_server_factory):
         assert agentgraph_dir.exists(), ".agentgraph directory should exist"
         gitignore = agentgraph_dir / ".gitignore"
         assert gitignore.exists(), ".agentgraph/.gitignore should exist"
-        assert gitignore.read_text().strip() == "*", ".gitignore should contain '*'"
+        gitignore_lines = gitignore.read_text().split()
+        assert gitignore_lines[0] == "*", ".gitignore should ignore everything by default"
+        assert "!factory.json" in gitignore_lines, "factory.json must stay versioned"
 
         run_dir = target_repo / ".agentgraph" / "runs" / "dryrun-a"
         assert run_dir.exists(), "run directory should exist"
