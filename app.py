@@ -15,6 +15,7 @@ from datastar_py.sanic import datastar_response
 from agentgraph.sqlite_sink import SqliteMirror
 from agentgraph import Mission, AgentSpec
 from agentgraph.mission import EDIT_TOOLS, READ_TOOLS
+from agentgraph.dispatcher import ScriptedWorker
 
 APP_ROOT = Path(__file__).resolve().parent
 KNOWN_REPOS_PATH = APP_ROOT / ".agentgraph" / "known_repos.json"
@@ -471,6 +472,32 @@ def prepare_run_directory(run_dir: Path) -> None:
         gitignore_path.write_text("*\n", encoding="utf-8")
 
 
+DRY_RUN_AGENT_SECONDS = 1.5
+DRY_RUN_INVOCATIONS_FILE = "dry-run-invocations.txt"
+
+
+def create_dry_run_worker(run_dir: Path, agent_names: list[str]):
+    """ScriptedWorker for CONDUCTION_DRY_RUN=1: no model calls, ~1.5 s per agent.
+
+    Cache hits never reach the worker and are indistinguishable in the log by
+    design, so each real invocation is appended to run_dir/dry-run-invocations.txt
+    -- the only honest record of which agents actually executed.
+    """
+    invocations_path = run_dir / DRY_RUN_INVOCATIONS_FILE
+
+    def dry_run_responder(request, api):
+        with invocations_path.open("a", encoding="utf-8") as invocations:
+            invocations.write(f"{request.worker}\n")
+        api.emit_finding(
+            topic="result",
+            summary="dry-run completed",
+            detail='{"files_changed": [], "verification": "dry-run", "done": true}',
+        )
+        return f"dry-run: {request.worker}"
+
+    return ScriptedWorker(dry_run_responder, delays={name: DRY_RUN_AGENT_SECONDS for name in agent_names})
+
+
 @app.post("/api/runs")
 async def launch_mission(request):
     """
@@ -556,6 +583,11 @@ async def launch_mission(request):
             transcript_dir=str(run_dir / "transcripts"),
         )
 
+        worker = (
+            create_dry_run_worker(run_dir, [spec.name for spec in agents])
+            if os.environ.get("CONDUCTION_DRY_RUN") == "1" else None
+        )
+
         stop_event = threading.Event()
         entry = {
             "thread": None,
@@ -569,7 +601,7 @@ async def launch_mission(request):
 
         def run_mission_thread():
             try:
-                mission.run(str(log_path), stop_when=stop_event.is_set)
+                mission.run(str(log_path), worker=worker, stop_when=stop_event.is_set)
             except Exception as error:
                 print(f"Mission {run_id} errored: {error}")
             finally:
@@ -708,6 +740,11 @@ async def resume_mission(request, run_id: str):
             transcript_dir=str(resume_dir / "transcripts"),
         )
 
+        worker = (
+            create_dry_run_worker(resume_dir, [spec.name for spec in merged_agents])
+            if os.environ.get("CONDUCTION_DRY_RUN") == "1" else None
+        )
+
         resume_run_id = compose_run_id(resume_slug, target_repo)
         original_log_path = ref.log_path
 
@@ -727,6 +764,7 @@ async def resume_mission(request, run_id: str):
                 mission.resume(
                     str(original_log_path),
                     str(new_log_path),
+                    worker=worker,
                     stop_when=stop_event.is_set,
                 )
             except Exception as error:
@@ -783,8 +821,8 @@ async def query_findings(request):
 
     text_filter = request.args.get("text")
     if text_filter:
-        query += " AND LOWER(f.summary) LIKE ?"
-        params.append(f"%{text_filter.lower()}%")
+        query += " AND (LOWER(f.summary) LIKE ? OR LOWER(f.topic) LIKE ?)"
+        params.extend([f"%{text_filter.lower()}%"] * 2)
 
     worker_filter = request.args.get("worker")
     if worker_filter:

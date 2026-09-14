@@ -17,3 +17,5 @@
 #      command).
 #
 pytest>=8.0
+
+requests  # tests/test_steering_flow.py HTTP client
