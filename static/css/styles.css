@@ -741,3 +741,266 @@ select.form-input[multiple] {
     font-size: 0.9rem;
     line-height: 1.5;
 }
+
+/* Factory Pipelines */
+.factory-container {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.factory-section {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 2rem;
+    margin-bottom: 2rem;
+}
+
+.factory-section h2 {
+    font-size: 1.5rem;
+    margin-bottom: 1.5rem;
+    color: #667eea;
+}
+
+.factory-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+}
+
+.factory-section-header h2 {
+    margin: 0;
+}
+
+.factory-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.btn-danger {
+    padding: 0.5rem 1rem;
+    background: #e74c3c;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.btn-danger:hover:not(:disabled) {
+    background: #c0392b;
+}
+
+.btn-danger:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.factory-example {
+    margin-top: 2rem;
+    padding-top: 2rem;
+    border-top: 1px solid #e9ecef;
+}
+
+.example-content {
+    margin-top: 1rem;
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    padding: 1.5rem;
+}
+
+.example-content pre {
+    background: #2d2d2d;
+    color: #f8f8f2;
+    padding: 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+.example-content code {
+    font-family: 'Courier New', Courier, monospace;
+}
+
+/* Factory Runs List */
+.factory-run-item {
+    padding: 1rem;
+    border: 2px solid #e9ecef;
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.factory-run-item:hover {
+    background: #f8f9fa;
+    border-color: #667eea;
+}
+
+.factory-run-item.selected {
+    background: #eef1ff;
+    border-color: #667eea;
+}
+
+.factory-run-title {
+    font-weight: 600;
+    font-size: 1.05rem;
+    color: #333;
+    margin-bottom: 0.25rem;
+}
+
+.factory-run-meta {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.85rem;
+    color: #666;
+    align-items: center;
+}
+
+/* Pipeline View */
+.pipeline-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+}
+
+.pipeline-status-label {
+    font-weight: 600;
+    color: #666;
+}
+
+.wave-pipeline {
+    display: grid;
+    gap: 1rem;
+}
+
+.wave-card {
+    background: white;
+    border: 2px solid #e9ecef;
+    border-radius: 8px;
+    padding: 1.25rem;
+    transition: all 0.2s;
+}
+
+.wave-card.current {
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.wave-card.pending {
+    opacity: 0.7;
+}
+
+.wave-card.running {
+    border-color: #ffc107;
+    background: #fffbf0;
+}
+
+.wave-card.passed {
+    border-color: #50c878;
+    background: #f0fdf4;
+}
+
+.wave-card.failed {
+    border-color: #e74c3c;
+    background: #fef2f2;
+}
+
+.wave-card.skipped {
+    opacity: 0.5;
+    background: #f5f5f5;
+}
+
+.wave-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.wave-number {
+    display: inline-block;
+    padding: 0.25rem 0.5rem;
+    background: #667eea;
+    color: white;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-right: 0.5rem;
+}
+
+.wave-slug {
+    font-weight: 600;
+    font-size: 1.1rem;
+    color: #333;
+}
+
+.wave-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.wave-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+}
+
+.wave-info-label {
+    font-weight: 500;
+    color: #666;
+}
+
+.gate-passed {
+    color: #50c878;
+    font-weight: 600;
+}
+
+.gate-failed {
+    color: #e74c3c;
+    font-weight: 600;
+}
+
+.wave-run-link {
+    color: #667eea;
+    text-decoration: none;
+    font-weight: 500;
+    transition: color 0.2s;
+}
+
+.wave-run-link:hover {
+    color: #764ba2;
+    text-decoration: underline;
+}
+
+/* Status Pills (additional states for factory) */
+.run-status.pending {
+    background: #f0f0f0;
+    color: #666;
+}
+
+.run-status.passed {
+    background: #d4edda;
+    color: #155724;
+}
+
+.run-status.interrupted {
+    background: #fff3cd;
+    color: #856404;
+}

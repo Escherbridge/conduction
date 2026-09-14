@@ -18,6 +18,11 @@ from agentgraph.mission import EDIT_TOOLS, READ_TOOLS
 from agentgraph.dispatcher import ScriptedWorker
 from agentgraph.gates import gate_from_spec, validate_gate_spec
 from agentgraph.sdk_workers import resolve_workers, available_sdks
+from agentgraph.factory import (
+    FactoryRunner,
+    load_factory_spec,
+    validate_factory_spec,
+)
 
 APP_ROOT = Path(__file__).resolve().parent
 KNOWN_REPOS_PATH = APP_ROOT / ".agentgraph" / "known_repos.json"
@@ -261,19 +266,23 @@ async def setup_mirror(app):
     app.ctx.mirror = SqliteMirror(MIRROR_DB_PATH)
     app.ctx.mirror_lock = asyncio.Lock()
     app.ctx.mission_processes = {}
+    app.ctx.factory_runs = {}
     async with app.ctx.mirror_lock:
         await asyncio.to_thread(purge_legacy_run_ids, app)
 
 
 @app.before_server_stop
 async def stop_missions(app):
-    """Signal every tracked mission and give its thread a bounded chance to unwind"""
-    for entry in app.ctx.mission_processes.values():
+    """Signal every tracked mission/factory run and give its thread a bounded chance to unwind"""
+    tracked = list(app.ctx.mission_processes.values()) + list(
+        getattr(app.ctx, "factory_runs", {}).values()
+    )
+    for entry in tracked:
         entry["stop_event"].set()
     threads = [
         entry["thread"]
-        for entry in app.ctx.mission_processes.values()
-        if entry["thread"].is_alive()
+        for entry in tracked
+        if entry["thread"] is not None and entry["thread"].is_alive()
     ]
     if threads:
         await asyncio.to_thread(join_mission_threads, threads, MISSION_JOIN_TIMEOUT_SECONDS)
@@ -325,7 +334,11 @@ async def list_runs(request):
 
 @app.get("/api/runs/<run_id:runid>/agents")
 async def get_run_agents(request, run_id: str):
-    """Return agents for a specific run"""
+    """Return agents for a specific run, mirroring it from disk first"""
+    ref = await asyncio.to_thread(find_run, request.app, run_id)
+    if ref is not None:
+        await mirror_single_run(request.app, ref)
+
     run_rows = await fetch_rows(
         request.app,
         "SELECT target_repo FROM runs WHERE run_id = ?",
@@ -881,6 +894,301 @@ async def resume_mission(request, run_id: str):
             }
         )
 
+    except Exception as error:
+        return sanic_json({"error": str(error)}, status=500)
+
+
+# ---------------------------------------------------------------------------
+# Factory: an ordered list of waves, each wave one gated Mission.
+# See agentgraph/factory.py for the runtime; this module only exposes it.
+# ---------------------------------------------------------------------------
+
+DEFAULT_FACTORY_PATH = ".agentgraph/factory.json"
+
+
+def factory_spec_path(target_repo: Path, factory_path: object) -> tuple[Path | None, str | None]:
+    """Resolve the repo-relative factory.json path inside target_repo."""
+    raw = factory_path if isinstance(factory_path, str) and factory_path.strip() else DEFAULT_FACTORY_PATH
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return None, "factory_path must be relative to target_repo"
+    resolved = (target_repo / candidate).resolve()
+    if not resolved.is_relative_to(target_repo):
+        return None, "factory_path escapes target_repo"
+    return resolved, None
+
+
+def load_spec_or_errors(spec_path: Path):
+    """(spec, errors) -- never raises; every validation problem is listed."""
+    if not spec_path.exists():
+        return None, ["factory spec not found: %s" % spec_path]
+    try:
+        data = stdlib_json.loads(spec_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as error:
+        return None, ["factory spec is not readable JSON: %s" % error]
+    if not isinstance(data, dict):
+        return None, ["factory spec must be a JSON object"]
+    errors = validate_factory_spec(data)
+    if errors:
+        return None, list(errors)
+    try:
+        return load_factory_spec(spec_path), []
+    except Exception as error:
+        return None, [str(error)]
+
+
+def factory_state_paths() -> list[Path]:
+    paths: list[Path] = []
+    for repo in repos_to_scan():
+        runs_dir = repo / ".agentgraph" / "factory-runs"
+        if not runs_dir.is_dir():
+            continue
+        paths.extend(sorted(runs_dir.glob("*/state.json")))
+    return paths
+
+
+def read_factory_state(state_path: Path) -> dict | None:
+    try:
+        state = stdlib_json.loads(state_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def find_factory_state(factory_run_id: str):
+    for state_path in factory_state_paths():
+        if state_path.parent.name != factory_run_id:
+            continue
+        state = read_factory_state(state_path)
+        if state is not None:
+            return state_path, state
+    return None
+
+
+def factory_worker_factory(run_dir: Path, specs):
+    """CONDUCTION_DRY_RUN=1 -> ScriptedWorker; otherwise let the runner resolve SDKs."""
+    if os.environ.get("CONDUCTION_DRY_RUN") == "1":
+        return create_dry_run_worker(run_dir, [spec.name for spec in specs])
+    return None
+
+
+def start_factory_thread(app, spec, target_repo: Path, factory_run_id: str, start_wave: int) -> dict:
+    """Bounded-thread + stop_event launch, mirroring launch_mission."""
+    stop_event = threading.Event()
+    entry = {
+        "thread": None,
+        "stop_event": stop_event,
+        "factory_slug": spec.slug,
+        "target_repo": str(target_repo),
+        "status": "running",
+    }
+    runner = FactoryRunner(
+        spec,
+        target_repo,
+        factory_run_id=factory_run_id,
+        worker_factory=factory_worker_factory,
+        model=DEFAULT_MISSION_MODEL,
+        stop_when=stop_event.is_set,
+    )
+
+    def run_factory_thread():
+        try:
+            runner.run(start_wave=start_wave)
+        except Exception as error:
+            print("Factory %s errored: %s" % (factory_run_id, error))
+        finally:
+            entry["status"] = "finished"
+
+    thread = threading.Thread(target=run_factory_thread, name="factory-%s" % factory_run_id)
+    entry["thread"] = thread
+    app.ctx.factory_runs[factory_run_id] = entry
+    thread.start()
+    return entry
+
+
+def active_factory_count(app) -> int:
+    for entry in app.ctx.factory_runs.values():
+        if entry["status"] == "running" and not entry["thread"].is_alive():
+            entry["status"] = "finished"
+    return sum(1 for entry in app.ctx.factory_runs.values() if entry["status"] == "running")
+
+
+@app.get("/factory")
+async def factory_page(request):
+    """Serves the factory pipeline view"""
+    template_path = APP_ROOT / "templates" / "factory.html"
+    if not template_path.exists():
+        return html("<!doctype html><html><body><h1>Factory</h1></body></html>")
+    return html(render_template("factory.html"))
+
+
+@app.get("/api/factory/spec")
+async def get_factory_spec(request):
+    """The parsed spec for the UI editor, or the validation errors."""
+    target_repo, repo_error = validate_target_repo(request.args.get("target_repo"))
+    if repo_error:
+        return sanic_json({"error": repo_error}, status=400)
+    spec_path, path_error = factory_spec_path(target_repo, request.args.get("factory_path"))
+    if path_error:
+        return sanic_json({"error": path_error}, status=400)
+    spec, errors = await asyncio.to_thread(load_spec_or_errors, spec_path)
+    if errors:
+        return sanic_json({"errors": errors, "spec_path": str(spec_path)}, status=400)
+    return sanic_json(
+        {
+            "slug": spec.slug,
+            "description": spec.description,
+            "spec_path": str(spec_path),
+            "waves": [
+                {
+                    "slug": wave.slug,
+                    "agents": wave.agents,
+                    "gate": wave.gate,
+                    "synthesis": wave.synthesis,
+                    "max_turns": wave.max_turns,
+                    "max_concurrency": wave.max_concurrency,
+                }
+                for wave in spec.waves
+            ],
+        }
+    )
+
+
+@app.post("/api/factory/runs")
+async def launch_factory(request):
+    """Launch a factory run: waves run sequentially, halting on the first failed gate."""
+    try:
+        body = request.json or {}
+        target_repo, repo_error = validate_target_repo(body.get("target_repo"))
+        if repo_error:
+            return sanic_json({"error": repo_error}, status=400)
+
+        spec_path, path_error = factory_spec_path(target_repo, body.get("factory_path"))
+        if path_error:
+            return sanic_json({"error": path_error}, status=400)
+
+        spec, errors = await asyncio.to_thread(load_spec_or_errors, spec_path)
+        if errors:
+            return sanic_json({"errors": errors}, status=400)
+
+        if active_factory_count(request.app) >= MAX_CONCURRENT_MISSIONS:
+            return sanic_json(
+                {"error": "Too many factory runs running (max %d)" % MAX_CONCURRENT_MISSIONS},
+                status=409,
+            )
+
+        await asyncio.to_thread(remember_repo, target_repo)
+
+        factory_run_id = "%s-%d" % (spec.slug, int(time.time()))
+        state_path = target_repo / ".agentgraph" / "factory-runs" / factory_run_id / "state.json"
+        start_factory_thread(request.app, spec, target_repo, factory_run_id, 0)
+
+        return sanic_json(
+            {
+                "factory_run_id": factory_run_id,
+                "target_repo": str(target_repo),
+                "waves": [wave.slug for wave in spec.waves],
+                "state_path": str(state_path),
+            }
+        )
+    except Exception as error:
+        return sanic_json({"error": str(error)}, status=500)
+
+
+@app.get("/api/factory/runs")
+async def list_factory_runs(request):
+    """Every factory run state.json across all known repos."""
+
+    def collect() -> list[dict]:
+        items = []
+        for state_path in factory_state_paths():
+            state = read_factory_state(state_path)
+            if state is None:
+                continue
+            item = dict(state)
+            item.setdefault("target_repo", str(state_path.parents[3]))
+            item["state_path"] = str(state_path)
+            items.append(item)
+        return items
+
+    return sanic_json(await asyncio.to_thread(collect))
+
+
+@app.get("/api/factory/runs/<factory_run_id:runid>")
+async def get_factory_run(request, factory_run_id: str):
+    """The state.json for one factory run (the source of truth on disk)."""
+    found = await asyncio.to_thread(find_factory_state, factory_run_id)
+    if found is None:
+        return sanic_json({"error": "Factory run not found: %s" % factory_run_id}, status=404)
+    state_path, state = found
+    state = dict(state)
+    state["state_path"] = str(state_path)
+    return sanic_json(state)
+
+
+@app.post("/api/factory/runs/<factory_run_id:runid>/interrupt")
+async def interrupt_factory(request, factory_run_id: str):
+    """Signal a running factory to stop after the in-flight wave."""
+    active_factory_count(request.app)
+    entry = request.app.ctx.factory_runs.get(factory_run_id)
+    if not entry:
+        return sanic_json(
+            {"error": "Factory run not found or not launched by this server"}, status=404
+        )
+    if not entry["thread"].is_alive():
+        return sanic_json(
+            {"error": "Factory thread is no longer alive", "status": entry["status"]},
+            status=409,
+        )
+    entry["stop_event"].set()
+    return sanic_json(
+        {"factory_run_id": factory_run_id, "will_stop_after": "current wave"}, status=202
+    )
+
+
+@app.post("/api/factory/runs/<factory_run_id:runid>/resume")
+async def resume_factory(request, factory_run_id: str):
+    """Re-run the factory from its first non-passed wave, under the same factory_run_id."""
+    try:
+        active_factory_count(request.app)
+        entry = request.app.ctx.factory_runs.get(factory_run_id)
+        if entry and entry["thread"].is_alive():
+            return sanic_json({"error": "Factory run is still running"}, status=409)
+
+        found = await asyncio.to_thread(find_factory_state, factory_run_id)
+        if found is None:
+            return sanic_json({"error": "Factory run not found: %s" % factory_run_id}, status=404)
+        _, state = found
+
+        target_repo, repo_error = validate_target_repo(state.get("target_repo"))
+        if repo_error:
+            return sanic_json({"error": repo_error}, status=400)
+
+        body = request.json or {}
+        spec_path, path_error = factory_spec_path(target_repo, body.get("factory_path"))
+        if path_error:
+            return sanic_json({"error": path_error}, status=400)
+        spec, errors = await asyncio.to_thread(load_spec_or_errors, spec_path)
+        if errors:
+            return sanic_json({"errors": errors}, status=400)
+
+        waves = state.get("waves") or []
+        start_wave = len(spec.waves) - 1
+        for index, wave in enumerate(waves):
+            if wave.get("status") != "passed":
+                start_wave = index
+                break
+        start_wave = max(0, min(start_wave, len(spec.waves) - 1))
+
+        start_factory_thread(request.app, spec, target_repo, factory_run_id, start_wave)
+        return sanic_json(
+            {
+                "factory_run_id": factory_run_id,
+                "target_repo": str(target_repo),
+                "start_wave": start_wave,
+                "waves": [wave.slug for wave in spec.waves],
+            }
+        )
     except Exception as error:
         return sanic_json({"error": str(error)}, status=500)
 

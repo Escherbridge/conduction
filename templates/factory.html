@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Factory Pipelines - Conduction</title>
+    <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-beta.1/bundles/datastar.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div id="app-root">
+        <header>
+            <h1>Conduction</h1>
+            <p>Factory Pipeline Manager</p>
+            <nav>
+                <a href="/">Home</a>
+                <a href="/runs">Runs</a>
+                <a href="/launch">Launch Mission</a>
+            </nav>
+        </header>
+        <main id="main-content">
+            <div class="factory-container">
+                <!-- Factory Run Form -->
+                <div class="factory-section">
+                    <h2>Run Factory</h2>
+                    <form id="factory-form">
+                        <div class="form-group">
+                            <label for="target_repo">Target Repository</label>
+                            <input type="text" id="target_repo" name="target_repo" required
+                                   placeholder="/path/to/repo" class="form-input">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="factory_path">Factory Path (optional)</label>
+                            <input type="text" id="factory_path" name="factory_path"
+                                   placeholder=".agentgraph/factory.json" class="form-input">
+                            <small style="color: #666; font-size: 0.85rem;">
+                                Default: .agentgraph/factory.json
+                            </small>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="submit" class="btn-primary">
+                                Run Factory
+                            </button>
+                            <span id="factory-status" class="launch-status"></span>
+                        </div>
+
+                        <div id="error-display" class="error-display" style="display: none;"></div>
+                    </form>
+
+                    <!-- Example Factory JSON -->
+                    <div class="factory-example">
+                        <button type="button" id="toggle-example-btn" class="btn-secondary">
+                            Show Example factory.json
+                        </button>
+                        <div id="example-content" class="example-content" style="display: none;">
+                            <pre><code>{
+  "slug": "quality-pipeline",
+  "description": "Three-wave quality assurance pipeline",
+  "waves": [
+    {
+      "slug": "implement",
+      "agents": [
+        {
+          "name": "backend-dev",
+          "brief": "Implement the API endpoints per spec.",
+          "tools": ["Read", "Grep", "Glob", "Edit", "Write"],
+          "owns": ["api/*.py"]
+        },
+        {
+          "name": "frontend-dev",
+          "brief": "Build the UI components.",
+          "tools": ["Read", "Grep", "Glob", "Edit", "Write"],
+          "owns": ["ui/*.tsx"]
+        }
+      ],
+      "gate": {
+        "pytest": true,
+        "owns": true
+      },
+      "max_turns": 35,
+      "max_concurrency": 2
+    },
+    {
+      "slug": "review",
+      "agents": [
+        {
+          "name": "security-reviewer",
+          "brief": "Review for security issues.",
+          "tools": ["Read", "Grep", "Glob"]
+        },
+        {
+          "name": "code-reviewer",
+          "brief": "Review code quality and style.",
+          "tools": ["Read", "Grep", "Glob"]
+        }
+      ],
+      "gate": {},
+      "max_turns": 20,
+      "max_concurrency": 2
+    },
+    {
+      "slug": "integration",
+      "agents": [
+        {
+          "name": "integration-tester",
+          "brief": "Write and run integration tests.",
+          "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+          "owns": ["tests/integration/*.py"]
+        }
+      ],
+      "gate": {
+        "pytest": true,
+        "probe": {
+          "routes": ["/", "/health", "/api/status"]
+        }
+      },
+      "synthesis": "Summarize test coverage and integration results.",
+      "max_turns": 30
+    }
+  ]
+}</code></pre>
+                            <p style="margin-top: 1rem; color: #666; font-size: 0.9rem;">
+                                Save this to <code>&lt;target_repo&gt;/.agentgraph/factory.json</code>
+                                and adjust slugs, agents, and gates to match your project.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Factory Runs List -->
+                <div class="factory-section">
+                    <div class="factory-section-header">
+                        <h2>Factory Runs</h2>
+                        <button id="refresh-runs-btn" class="btn-secondary">↻ Refresh</button>
+                    </div>
+                    <div id="runs-list"></div>
+                </div>
+
+                <!-- Selected Run Detail -->
+                <div id="run-detail-section" class="factory-section" style="display: none;">
+                    <div class="factory-section-header">
+                        <h2 id="selected-run-title">Pipeline View</h2>
+                        <div class="factory-controls">
+                            <button id="interrupt-btn" class="btn-danger" style="display: none;">
+                                Interrupt
+                            </button>
+                            <button id="resume-btn" class="btn-secondary" style="display: none;">
+                                Resume
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="pipeline-view"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let factoryRuns = [];
+        let selectedRunId = null;
+        let pollInterval = null;
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[character]));
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Set up form handler
+            document.getElementById('factory-form').addEventListener('submit', handleSubmit);
+
+            // Set up example toggle
+            document.getElementById('toggle-example-btn').addEventListener('click', toggleExample);
+
+            // Set up refresh button
+            document.getElementById('refresh-runs-btn').addEventListener('click', loadFactoryRuns);
+
+            // Set up control buttons
+            document.getElementById('interrupt-btn').addEventListener('click', handleInterrupt);
+            document.getElementById('resume-btn').addEventListener('click', handleResume);
+
+            // Load initial runs list
+            await loadFactoryRuns();
+        });
+
+        function toggleExample() {
+            const content = document.getElementById('example-content');
+            const btn = document.getElementById('toggle-example-btn');
+
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                btn.textContent = 'Hide Example factory.json';
+            } else {
+                content.style.display = 'none';
+                btn.textContent = 'Show Example factory.json';
+            }
+        }
+
+        async function handleSubmit(e) {
+            e.preventDefault();
+
+            const statusSpan = document.getElementById('factory-status');
+            const errorDisplay = document.getElementById('error-display');
+            const submitBtn = e.target.querySelector('button[type="submit"]');
+
+            statusSpan.textContent = 'Launching factory...';
+            statusSpan.style.color = '#666';
+            errorDisplay.style.display = 'none';
+            submitBtn.disabled = true;
+
+            try {
+                const targetRepo = document.getElementById('target_repo').value.trim();
+                const factoryPath = document.getElementById('factory_path').value.trim() || undefined;
+
+                const payload = {
+                    target_repo: targetRepo,
+                    ...(factoryPath ? { factory_path: factoryPath } : {})
+                };
+
+                const response = await fetch('/api/factory/runs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    statusSpan.textContent = `✓ Launched: ${data.factory_run_id}`;
+                    statusSpan.style.color = '#50c878';
+
+                    // Reload runs list and select the new run
+                    await loadFactoryRuns();
+                    selectRun(data.factory_run_id);
+
+                    // Clear form
+                    document.getElementById('factory_path').value = '';
+                    submitBtn.disabled = false;
+                } else {
+                    const errorMessage = data.error || 'Launch failed';
+                    errorDisplay.textContent = errorMessage;
+                    errorDisplay.style.display = 'block';
+                    statusSpan.textContent = '✗ Failed';
+                    statusSpan.style.color = '#e74c3c';
+                    submitBtn.disabled = false;
+                }
+            } catch (error) {
+                errorDisplay.textContent = `Error: ${escapeHtml(error.message)}`;
+                errorDisplay.style.display = 'block';
+                statusSpan.textContent = '✗ Error';
+                statusSpan.style.color = '#e74c3c';
+                submitBtn.disabled = false;
+            }
+        }
+
+        async function loadFactoryRuns() {
+            try {
+                const response = await fetch('/api/factory/runs');
+                factoryRuns = await response.json();
+                renderRunsList();
+
+                // If a run is selected, refresh its detail
+                if (selectedRunId) {
+                    await loadRunDetail(selectedRunId);
+                }
+            } catch (error) {
+                console.error('Error loading factory runs:', error);
+                document.getElementById('runs-list').innerHTML = `
+                    <div class="empty-state">
+                        <p>Error loading runs: ${escapeHtml(error.message)}</p>
+                    </div>
+                `;
+            }
+        }
+
+        function renderRunsList() {
+            const container = document.getElementById('runs-list');
+
+            if (factoryRuns.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🏭</div>
+                        <p>No factory runs found</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const sortedRuns = [...factoryRuns].sort((a, b) =>
+                new Date(b.started_at) - new Date(a.started_at)
+            );
+
+            container.innerHTML = sortedRuns.map(run => {
+                const isSelected = run.factory_run_id === selectedRunId;
+                const statusClass = escapeHtml(run.status || 'running');
+                const repoName = run.target_repo ? run.target_repo.split(/[/\\]/).filter(Boolean).pop() : '-';
+
+                return `
+                    <div class="factory-run-item ${isSelected ? 'selected' : ''}"
+                         data-run-id="${escapeHtml(run.factory_run_id)}"
+                         onclick="selectRun('${escapeHtml(run.factory_run_id)}')">
+                        <div>
+                            <div class="factory-run-title">${escapeHtml(run.factory_slug || run.factory_run_id)}</div>
+                            <div class="factory-run-meta">
+                                <span class="repo-badge" title="${escapeHtml(run.target_repo || '')}">${escapeHtml(repoName)}</span>
+                                <span>${run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</span>
+                            </div>
+                        </div>
+                        <span class="run-status ${statusClass}">${statusClass}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function selectRun(runId) {
+            selectedRunId = runId;
+            renderRunsList(); // Re-render to show selection
+
+            // Show detail section
+            document.getElementById('run-detail-section').style.display = 'block';
+            document.getElementById('selected-run-title').textContent = `Pipeline: ${runId}`;
+
+            // Load and start polling
+            await loadRunDetail(runId);
+            startPolling();
+        }
+
+        async function loadRunDetail(runId) {
+            try {
+                const response = await fetch(`/api/factory/runs/${encodeURIComponent(runId)}`);
+                const runState = await response.json();
+
+                renderPipelineView(runState);
+                updateControlButtons(runState);
+            } catch (error) {
+                console.error('Error loading run detail:', error);
+                document.getElementById('pipeline-view').innerHTML = `
+                    <div class="empty-state">
+                        <p>Error loading pipeline: ${escapeHtml(error.message)}</p>
+                    </div>
+                `;
+            }
+        }
+
+        function renderPipelineView(runState) {
+            const container = document.getElementById('pipeline-view');
+
+            if (!runState.waves || runState.waves.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <p>No waves in this factory</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = `
+                <div class="pipeline-status-bar">
+                    <span class="pipeline-status-label">Overall Status:</span>
+                    <span class="run-status ${escapeHtml(runState.status || 'running')}">${escapeHtml(runState.status || 'running')}</span>
+                    <span style="color: #666; margin-left: 1rem;">Wave ${runState.current_wave + 1} of ${runState.waves.length}</span>
+                </div>
+
+                <div class="wave-pipeline">
+                    ${runState.waves.map((wave, index) => renderWaveCard(wave, index, runState)).join('')}
+                </div>
+            `;
+        }
+
+        function renderWaveCard(wave, index, runState) {
+            const statusClass = escapeHtml(wave.status || 'pending');
+            const isCurrent = index === runState.current_wave;
+            const runId = wave.run_id;
+            const gateKeys = wave.gate_passed !== undefined
+                ? Object.keys(wave.gate || {}).join(', ') || 'none'
+                : 'unknown';
+
+            return `
+                <div class="wave-card ${isCurrent ? 'current' : ''} ${statusClass}">
+                    <div class="wave-card-header">
+                        <div>
+                            <span class="wave-number">Wave ${index + 1}</span>
+                            <span class="wave-slug">${escapeHtml(wave.slug)}</span>
+                        </div>
+                        <span class="run-status ${statusClass}">${statusClass}</span>
+                    </div>
+
+                    <div class="wave-card-body">
+                        <div class="wave-info-row">
+                            <span class="wave-info-label">Agents:</span>
+                            <span>${wave.agents_count || 0}</span>
+                        </div>
+
+                        <div class="wave-info-row">
+                            <span class="wave-info-label">Gate:</span>
+                            <span>${escapeHtml(gateKeys)}</span>
+                        </div>
+
+                        ${wave.gate_passed !== undefined ? `
+                            <div class="wave-info-row">
+                                <span class="wave-info-label">Gate Passed:</span>
+                                <span class="${wave.gate_passed ? 'gate-passed' : 'gate-failed'}">
+                                    ${wave.gate_passed ? '✓ Yes' : '✗ No'}
+                                </span>
+                            </div>
+                        ` : ''}
+
+                        ${wave.agents_failed !== undefined ? `
+                            <div class="wave-info-row">
+                                <span class="wave-info-label">Agents Failed:</span>
+                                <span>${wave.agents_failed}</span>
+                            </div>
+                        ` : ''}
+
+                        ${runId ? `
+                            <div class="wave-info-row" style="margin-top: 0.5rem;">
+                                <a href="/runs/${encodeURIComponent(runId)}" class="wave-run-link">
+                                    View Mission Detail →
+                                </a>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateControlButtons(runState) {
+            const interruptBtn = document.getElementById('interrupt-btn');
+            const resumeBtn = document.getElementById('resume-btn');
+
+            if (runState.status === 'running') {
+                interruptBtn.style.display = 'inline-block';
+                resumeBtn.style.display = 'none';
+            } else if (runState.status === 'failed' || runState.status === 'interrupted') {
+                interruptBtn.style.display = 'none';
+                resumeBtn.style.display = 'inline-block';
+            } else {
+                interruptBtn.style.display = 'none';
+                resumeBtn.style.display = 'none';
+            }
+        }
+
+        function startPolling() {
+            // Clear existing interval
+            if (pollInterval) {
+                clearInterval(pollInterval);
+            }
+
+            // Poll every 2 seconds while a run is selected
+            pollInterval = setInterval(async () => {
+                if (selectedRunId) {
+                    const run = factoryRuns.find(r => r.factory_run_id === selectedRunId);
+                    if (run && run.status === 'running') {
+                        await loadRunDetail(selectedRunId);
+                        await loadFactoryRuns(); // Also refresh the list
+                    } else if (run && run.status !== 'running') {
+                        // Stop polling if run completed
+                        clearInterval(pollInterval);
+                        pollInterval = null;
+                    }
+                }
+            }, 2000);
+        }
+
+        async function handleInterrupt() {
+            if (!selectedRunId) return;
+
+            const btn = document.getElementById('interrupt-btn');
+            btn.disabled = true;
+
+            try {
+                const response = await fetch(`/api/factory/runs/${encodeURIComponent(selectedRunId)}/interrupt`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    alert('Interrupt signal sent');
+                    await loadRunDetail(selectedRunId);
+                } else {
+                    alert(`Failed: ${data.error || 'Unknown error'}`);
+                    btn.disabled = false;
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+                btn.disabled = false;
+            }
+        }
+
+        async function handleResume() {
+            if (!selectedRunId) return;
+
+            const btn = document.getElementById('resume-btn');
+            btn.disabled = true;
+
+            try {
+                const response = await fetch(`/api/factory/runs/${encodeURIComponent(selectedRunId)}/resume`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    alert(`Resumed: ${data.factory_run_id}`);
+                    await loadFactoryRuns();
+                    await loadRunDetail(selectedRunId);
+                    btn.disabled = false;
+                } else {
+                    alert(`Failed: ${data.error || 'Unknown error'}`);
+                    btn.disabled = false;
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+                btn.disabled = false;
+            }
+        }
+
+        // Clean up polling on page unload
+        window.addEventListener('beforeunload', () => {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+            }
+        });
+    </script>
+</body>
+</html>
