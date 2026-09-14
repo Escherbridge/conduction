@@ -18,11 +18,24 @@
         </header>
         <main id="main-content">
             <div class="run-detail">
-                <h2 id="run-title">Loading...</h2>
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem;">
+                    <div>
+                        <h2 id="run-title">Loading...</h2>
+                        <div id="parent-run-link" style="display: none; margin-top: 0.5rem;"></div>
+                    </div>
+                    <div class="action-buttons">
+                        <button id="replay-btn" class="btn-action btn-replay" title="Replay this run for $0">Replay ($0)</button>
+                        <button id="delete-btn" class="btn-action btn-delete" title="Delete this run">Delete</button>
+                    </div>
+                </div>
                 <div class="run-info" id="run-info">
                     <div class="run-info-item">
                         <span class="run-info-label">Status</span>
                         <span class="run-info-value run-status" id="run-status">-</span>
+                    </div>
+                    <div class="run-info-item">
+                        <span class="run-info-label">Kind</span>
+                        <span class="run-info-value kind-badge" id="run-kind">-</span>
                     </div>
                     <div class="run-info-item">
                         <span class="run-info-label">Started</span>
@@ -62,42 +75,74 @@
                     </div>
                 </div>
 
-                <div class="swimlanes-container">
-                    <div class="swimlanes-header">
-                        <h3>Agent Swim Lanes</h3>
-                        <div style="font-size: 0.85rem; color: #666;">
-                            <span style="display: inline-block; margin-right: 1rem;">
-                                <span style="display: inline-block; width: 12px; height: 12px; background: #4a90e2; border-radius: 50%; margin-right: 4px;"></span>
-                                Request
-                            </span>
-                            <span style="display: inline-block; margin-right: 1rem;">
-                                <span style="display: inline-block; width: 12px; height: 12px; background: #50c878; border-radius: 50%; margin-right: 4px;"></span>
-                                Response
-                            </span>
-                            <span style="display: inline-block; margin-right: 1rem;">
-                                <span style="display: inline-block; width: 12px; height: 12px; background: #9b59b6; border-radius: 50%; margin-right: 4px;"></span>
-                                Claim OK
-                            </span>
-                            <span style="display: inline-block; margin-right: 1rem;">
-                                <span style="display: inline-block; width: 12px; height: 12px; background: #e74c3c; border-radius: 50%; margin-right: 4px;"></span>
-                                Claim Rejected
-                            </span>
-                            <span style="display: inline-block; margin-right: 1rem;">
-                                <span style="display: inline-block; width: 12px; height: 12px; background: #f39c12; border-radius: 50%; margin-right: 4px;"></span>
-                                Finding
-                            </span>
-                            <span style="display: inline-block;">
-                                <span style="display: inline-block; width: 10px; height: 10px; background: #d35400; margin-right: 4px; transform: rotate(45deg);"></span>
-                                Blocked Command
-                            </span>
+                <!-- Tabbed Interface -->
+                <div class="tabs-container">
+                    <div class="tabs-header">
+                        <button class="tab-button active" data-tab="swimlanes">Swim Lanes</button>
+                        <button class="tab-button" data-tab="story">Story</button>
+                        <button class="tab-button" data-tab="manifest">Manifest</button>
+                    </div>
+
+                    <!-- Swim Lanes Tab -->
+                    <div class="tab-content active" id="tab-swimlanes">
+                        <div class="swimlanes-container">
+                            <div class="swimlanes-header">
+                                <h3>Agent Swim Lanes</h3>
+                                <div style="font-size: 0.85rem; color: #666;">
+                                    <span style="display: inline-block; margin-right: 1rem;">
+                                        <span style="display: inline-block; width: 12px; height: 12px; background: #4a90e2; border-radius: 50%; margin-right: 4px;"></span>
+                                        Request
+                                    </span>
+                                    <span style="display: inline-block; margin-right: 1rem;">
+                                        <span style="display: inline-block; width: 12px; height: 12px; background: #50c878; border-radius: 50%; margin-right: 4px;"></span>
+                                        Response
+                                    </span>
+                                    <span style="display: inline-block; margin-right: 1rem;">
+                                        <span style="display: inline-block; width: 12px; height: 12px; background: #9b59b6; border-radius: 50%; margin-right: 4px;"></span>
+                                        Claim OK
+                                    </span>
+                                    <span style="display: inline-block; margin-right: 1rem;">
+                                        <span style="display: inline-block; width: 12px; height: 12px; background: #e74c3c; border-radius: 50%; margin-right: 4px;"></span>
+                                        Claim Rejected
+                                    </span>
+                                    <span style="display: inline-block; margin-right: 1rem;">
+                                        <span style="display: inline-block; width: 12px; height: 12px; background: #f39c12; border-radius: 50%; margin-right: 4px;"></span>
+                                        Finding
+                                    </span>
+                                    <span style="display: inline-block;">
+                                        <span style="display: inline-block; width: 10px; height: 10px; background: #d35400; margin-right: 4px; transform: rotate(45deg);"></span>
+                                        Blocked Command
+                                    </span>
+                                </div>
+                            </div>
+                            <div id="swimlanes"></div>
+                        </div>
+
+                        <div class="findings-section">
+                            <h3>Findings</h3>
+                            <div id="findings"></div>
                         </div>
                     </div>
-                    <div id="swimlanes"></div>
-                </div>
 
-                <div class="findings-section">
-                    <h3>Findings</h3>
-                    <div id="findings"></div>
+                    <!-- Story Tab -->
+                    <div class="tab-content" id="tab-story">
+                        <div class="story-container">
+                            <h3>Mission Story</h3>
+                            <div id="story-content" class="story-content">
+                                <div class="loading">Loading story...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Manifest Tab -->
+                    <div class="tab-content" id="tab-manifest">
+                        <div class="manifest-container">
+                            <h3>Mission Manifest</h3>
+                            <div id="manifest-content" class="manifest-content">
+                                <div class="loading">Loading manifest...</div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </main>
@@ -112,6 +157,8 @@
         let targetRepo = null;
         let runStatus = null;
         let missionEventSource = null;
+        let manifestData = null;
+        let storyData = null;
 
         function escapeHtml(value) {
             return String(value ?? '').replace(/[&<>"']/g, character => ({
@@ -132,12 +179,247 @@
             return segments.length ? segments[segments.length - 1] : fullPath;
         }
 
+        function renderSimpleMarkdown(text) {
+            // Simple line-based markdown renderer
+            // Lines starting with '#' become headings, '- ' become list items, else <p>
+            const lines = text.split('\n');
+            let html = '';
+            let inList = false;
+
+            lines.forEach(line => {
+                const trimmed = line.trim();
+
+                if (trimmed.startsWith('#### ')) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += `<h4>${escapeHtml(trimmed.slice(5))}</h4>`;
+                } else if (trimmed.startsWith('### ')) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += `<h3>${escapeHtml(trimmed.slice(4))}</h3>`;
+                } else if (trimmed.startsWith('## ')) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += `<h3>${escapeHtml(trimmed.slice(3))}</h3>`;
+                } else if (trimmed.startsWith('# ')) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += `<h3>${escapeHtml(trimmed.slice(2))}</h3>`;
+                } else if (trimmed.startsWith('- ')) {
+                    if (!inList) { html += '<ul>'; inList = true; }
+                    html += `<li>${escapeHtml(trimmed.slice(2))}</li>`;
+                } else if (trimmed === '') {
+                    if (inList) { html += '</ul>'; inList = false; }
+                } else {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += `<p>${escapeHtml(line)}</p>`;
+                }
+            });
+
+            if (inList) { html += '</ul>'; }
+            return html;
+        }
+
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.classList.remove('active');
+            });
+
+            // Show selected tab
+            document.getElementById(`tab-${tabName}`).classList.add('active');
+            document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+            // Load content if needed
+            if (tabName === 'story' && !storyData) {
+                fetchStory();
+            } else if (tabName === 'manifest' && !manifestData) {
+                fetchManifest();
+            }
+        }
+
+        async function fetchStory() {
+            try {
+                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/story`);
+                const container = document.getElementById('story-content');
+
+                if (response.ok) {
+                    storyData = await response.text();
+                    container.innerHTML = renderSimpleMarkdown(storyData);
+                } else if (response.status === 404) {
+                    container.innerHTML = '<div class="empty-state"><p>Story not available for this run</p></div>';
+                } else {
+                    container.innerHTML = `<div class="empty-state"><p>Error loading story: ${escapeHtml(response.statusText)}</p></div>`;
+                }
+            } catch (error) {
+                console.error('Error fetching story:', error);
+                document.getElementById('story-content').innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+            }
+        }
+
+        async function fetchManifest() {
+            try {
+                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/manifest`);
+                const container = document.getElementById('manifest-content');
+
+                if (response.ok) {
+                    manifestData = await response.json();
+                    renderManifest(manifestData);
+                } else if (response.status === 404) {
+                    container.innerHTML = '<div class="empty-state"><p>Manifest not available for this run</p></div>';
+                } else {
+                    container.innerHTML = `<div class="empty-state"><p>Error loading manifest: ${escapeHtml(response.statusText)}</p></div>`;
+                }
+            } catch (error) {
+                console.error('Error fetching manifest:', error);
+                document.getElementById('manifest-content').innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(error.message)}</p></div>`;
+            }
+        }
+
+        function renderManifest(manifest) {
+            const container = document.getElementById('manifest-content');
+            const agents = manifest.agents || [];
+
+            let html = '<div class="manifest-section">';
+            html += '<h4>Overview</h4>';
+            html += '<table class="manifest-table">';
+            html += `<tr><th>Field</th><th>Value</th></tr>`;
+            html += `<tr><td>Schema</td><td>${escapeHtml(manifest.schema || '-')}</td></tr>`;
+            html += `<tr><td>Kind</td><td><span class="kind-badge kind-${escapeHtml(manifest.kind || 'legacy')}">${escapeHtml(manifest.kind || 'legacy')}</span></td></tr>`;
+            html += `<tr><td>Slug</td><td>${escapeHtml(manifest.slug || '-')}</td></tr>`;
+            html += `<tr><td>Model</td><td>${escapeHtml(manifest.model || '-')}</td></tr>`;
+            html += `<tr><td>Max Turns</td><td>${escapeHtml(manifest.max_turns || '-')}</td></tr>`;
+            html += `<tr><td>Max Concurrency</td><td>${escapeHtml(manifest.max_concurrency || '-')}</td></tr>`;
+            html += `<tr><td>Target Repo</td><td>${escapeHtml(manifest.target_repo || '-')}</td></tr>`;
+            html += `<tr><td>Created At</td><td>${escapeHtml(manifest.created_at || '-')}</td></tr>`;
+            if (manifest.parent_run_id) {
+                html += `<tr><td>Parent Run</td><td><a href="/runs/${encodeURIComponent(manifest.parent_run_id)}">${escapeHtml(manifest.parent_run_id)}</a></td></tr>`;
+            }
+            html += '</table>';
+            html += '</div>';
+
+            if (agents.length > 0) {
+                html += '<div class="manifest-section">';
+                html += '<h4>Agents</h4>';
+                html += '<table class="manifest-table agents-table">';
+                html += '<tr><th>Name</th><th>SDK</th><th>Tools</th><th>Owns</th></tr>';
+                agents.forEach(agent => {
+                    const sdk = agent.sdk || 'claude';
+                    const tools = (agent.tools || []).join(', ');
+                    const owns = (agent.owns || []).join(', ');
+                    html += `<tr>`;
+                    html += `<td><strong>${escapeHtml(agent.name || '-')}</strong></td>`;
+                    html += `<td>${escapeHtml(sdk)}</td>`;
+                    html += `<td><code>${escapeHtml(tools)}</code></td>`;
+                    html += `<td><code>${escapeHtml(owns)}</code></td>`;
+                    html += `</tr>`;
+                });
+                html += '</table>';
+                html += '</div>';
+            }
+
+            html += '<div class="manifest-section">';
+            html += '<h4>Raw JSON</h4>';
+            html += `<pre class="manifest-json">${escapeHtml(JSON.stringify(manifest, null, 2))}</pre>`;
+            html += '</div>';
+
+            container.innerHTML = html;
+        }
+
+        async function handleReplay() {
+            if (!confirm('Replay this run? This will create a $0 replay from the cached results.')) {
+                return;
+            }
+
+            const replayBtn = document.getElementById('replay-btn');
+            replayBtn.disabled = true;
+            replayBtn.textContent = 'Replaying...';
+
+            try {
+                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/replay`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    window.location.href = `/runs/${encodeURIComponent(data.run_id)}`;
+                } else {
+                    const data = await response.json();
+                    alert(`Replay failed: ${data.error || response.statusText}`);
+                    replayBtn.disabled = false;
+                    replayBtn.textContent = 'Replay ($0)';
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+                replayBtn.disabled = false;
+                replayBtn.textContent = 'Replay ($0)';
+            }
+        }
+
+        async function handleDelete() {
+            if (!confirm('Delete this run? This will permanently remove the run directory and all data.')) {
+                return;
+            }
+
+            const deleteBtn = document.getElementById('delete-btn');
+            deleteBtn.disabled = true;
+            deleteBtn.textContent = 'Deleting...';
+
+            try {
+                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok || response.status === 204) {
+                    window.location.href = '/runs';
+                } else {
+                    const data = await response.json();
+                    alert(`Delete failed: ${data.error || response.statusText}`);
+                    deleteBtn.disabled = false;
+                    deleteBtn.textContent = 'Delete';
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+                deleteBtn.disabled = false;
+                deleteBtn.textContent = 'Delete';
+            }
+        }
+
+        async function fetchKindAndParent() {
+            try {
+                const response = await fetch(`/api/runs/${encodeURIComponent(RUN_ID)}/manifest`);
+                if (response.ok) {
+                    const manifest = await response.json();
+                    const kind = manifest.kind || 'legacy';
+                    const parentRunId = manifest.parent_run_id;
+
+                    // Update kind badge
+                    const kindBadge = document.getElementById('run-kind');
+                    kindBadge.textContent = kind;
+                    kindBadge.className = `run-info-value kind-badge kind-${kind}`;
+
+                    // Show parent link for replay runs
+                    if (kind === 'replay' && parentRunId) {
+                        const parentLink = document.getElementById('parent-run-link');
+                        parentLink.innerHTML = `<span class="parent-run-info">$0 replay of <a href="/runs/${encodeURIComponent(parentRunId)}">${escapeHtml(parentRunId)}</a></span>`;
+                        parentLink.style.display = 'block';
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching manifest for kind:', error);
+                document.getElementById('run-kind').textContent = 'legacy';
+            }
+        }
+
         // Initialize on page load
         window.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('run-title').textContent = RUN_ID;
 
             // Fetch run status/started_at from the runs list (stable endpoint)
             await fetchRunMeta();
+
+            // Fetch kind and parent info
+            await fetchKindAndParent();
 
             // Fetch agents
             await fetchAgents();
@@ -150,6 +432,12 @@
 
             // Set up mission controls
             setupMissionControls();
+
+            // Set up tabs
+            setupTabs();
+
+            // Set up action buttons
+            setupActionButtons();
         });
 
         async function fetchRunMeta() {
@@ -634,6 +922,20 @@
                     </div>
                 `;
             }).join('');
+        }
+
+        function setupTabs() {
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.addEventListener('click', () => {
+                    const tabName = button.getAttribute('data-tab');
+                    switchTab(tabName);
+                });
+            });
+        }
+
+        function setupActionButtons() {
+            document.getElementById('replay-btn').addEventListener('click', handleReplay);
+            document.getElementById('delete-btn').addEventListener('click', handleDelete);
         }
     </script>
 </body>

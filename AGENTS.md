@@ -52,6 +52,20 @@ The signal is a **durable file marker**, not an in-memory flag, so it survives i
 - **Slug validation** (app.py:23–24): `^[A-Za-z0-9._-]{1,64}$` enforces well-formed run IDs.
 - **Relaunch protection**: attempt to launch a run that is already in progress returns 409 (Conflict).
 
+## Manifests and Replay
+
+A **mission manifest** (`mission.json`) is written by app.py and factory.py into each run's directory before the mission starts. It is the source of truth for replaying a run without re-calling the API (app.py: `write_mission_manifest`, `manifest_from_request`). The manifest contains the exact agent specs, tools, model, gate, and other invariants needed to recompute a run bit-identically (agentgraph/manifest.py: schema version 1, kind: "mission" | "resume" | "replay" | "factory-wave").
+
+**Replay** (`POST /api/runs/<id>/replay` — not yet implemented) uses the manifest to rerun a mission deterministically. A replay run is $0 cost (uses cached agent responses per `(identity_hash, occurrence)`). The replay is served from the original log via `Mission.replay()` with no worker calls (agentgraph/manifest.py: `mission_from_manifest`, replay raises `ReplayCacheMiss` if specs don't hash to the same identity as the original).
+
+**Run story** (`GET /api/runs/<id>/story` — not yet implemented) narrates the run from the JSONL log as escaped markdown (file:line references, headings, list items). Uses `narrate_path(run.jsonl)` in a bounded thread to avoid blocking the event loop.
+
+## Factory Runs
+
+**Factory spec** is versioned as `<target_repo>/.agentgraph/factory.json`. Each entry is a `FactoryWave` with agents, gate, synthesis, and limits (agentgraph/factory.py: `FactoryWave`, `load_factory_spec`). `FactoryRunner` executes waves in order; each wave is one gated `Mission` (agentgraph/factory.py:280–303). State is persisted to `<factory_run_id>/state.json` and is resumable (agentgraph/factory.py: `FactoryRunState`).
+
+**factory-wave manifests** are written by `FactoryRunner` before each wave runs (agentgraph/factory.py: `_run_wave`) so waves are separately replayable.
+
 ## Running and Testing
 
 **Environment**: Conduction's venv (venv/) has sanic, datastar_py, sqlalchemy, aiosqlite. The AgentGraph module (agentgraph/) is imported in-process.
@@ -63,3 +77,13 @@ cd C:\Users\atooz\Programming\conduction && \
 ```
 
 The orchestrator's gate, after all agents finish, runs this suite plus HTTP probes on `/api/runs`, `/runs`, `/query`, `/api/query/costs`, `/api/query/claims/conflicts` on a dedicated port.
+
+## New Routes (Contract Item 4)
+
+Four new endpoints are being implemented to support manifests and replay:
+- **GET /api/runs/<id>/manifest**: Return the manifest JSON (404 if missing). app.py and sqlite_sink.py.
+- **GET /api/runs/<id>/story**: Return narrated run as text/markdown. Uses `narrate_path(run.jsonl)` in asyncio.to_thread.
+- **POST /api/runs/<id>/replay**: Creates a replay run from the manifest, runs it ($0 cost), returns `{run_id, slug, parent_run_id}`. Creates `.agentgraph/runs/<slug>-replay-<unix ts>/`, 409 if running, 400 if no manifest.
+- **DELETE /api/runs/<id>**: Removes the run dir and its SQLite mirror rows (SqliteMirror.delete_run). 204 if successful, 409 if running.
+
+Run list items and detail views gain "kind" (manifest, or "legacy" when absent) and "parent_run_id" badge ("$0 replay of <parent>").

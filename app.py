@@ -3,13 +3,15 @@ import asyncio
 import hashlib
 import json as stdlib_json
 import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote
 from sanic import Sanic
-from sanic.response import html, json as sanic_json
+from sanic.response import html, json as sanic_json, raw as _raw, text as raw_text, empty as empty_response
 from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.sanic import datastar_response
 from agentgraph.sqlite_sink import SqliteMirror
@@ -18,6 +20,13 @@ from agentgraph.mission import EDIT_TOOLS, READ_TOOLS
 from agentgraph.dispatcher import ScriptedWorker
 from agentgraph.gates import gate_from_spec, validate_gate_spec
 from agentgraph.sdk_workers import resolve_workers, available_sdks
+from agentgraph.manifest import (
+    manifest_from_request,
+    mission_from_manifest,
+    read_mission_manifest,
+    write_mission_manifest,
+)
+from agentgraph.narrate import narrate_path
 from agentgraph.factory import (
     FactoryRunner,
     load_factory_spec,
@@ -311,10 +320,21 @@ async def run_detail(request, run_id: str):
     return html(render_template("run_detail.html"))
 
 
+def read_run_manifests(refs: list[RunRef]) -> dict[str, dict]:
+    """run_id -> its mission.json (absent for legacy runs written before Wave K)."""
+    manifests: dict[str, dict] = {}
+    for ref in refs:
+        manifest = read_mission_manifest(ref.run_dir)
+        if manifest:
+            manifests[ref.run_id] = manifest
+    return manifests
+
+
 @app.get("/api/runs")
 async def list_runs(request):
     """List all mission runs, mirroring any new ones found on disk from all known repos"""
-    await mirror_all_runs(request.app)
+    refs = await mirror_all_runs(request.app)
+    manifests = await asyncio.to_thread(read_run_manifests, refs)
     rows = await fetch_rows(
         request.app,
         "SELECT run_id, slug, started_at, status, target_repo FROM runs ORDER BY started_at DESC",
@@ -326,6 +346,8 @@ async def list_runs(request):
             "started_at": row[2],
             "status": effective_status(request.app, row[0], row[3]),
             "target_repo": row[4],
+            "kind": (manifests.get(row[0]) or {}).get("kind", "legacy"),
+            "parent_run_id": (manifests.get(row[0]) or {}).get("parent_run_id"),
         }
         for row in rows
     ]
@@ -344,6 +366,8 @@ async def get_run_agents(request, run_id: str):
         "SELECT target_repo FROM runs WHERE run_id = ?",
         (run_id,),
     )
+    if ref is None and not run_rows:
+        return sanic_json({"error": f"Run not found: {run_id}"}, status=404)
     target_repo = run_rows[0][0] if run_rows else None
 
     agent_rows = await fetch_rows(
@@ -471,6 +495,149 @@ async def get_run_findings(request, run_id: str):
     return sanic_json(findings)
 
 
+@app.get("/api/runs/<run_id:runid>/manifest")
+async def get_run_manifest(request, run_id: str):
+    """The run's mission.json — what it would take to replay it."""
+    ref = await asyncio.to_thread(find_run, request.app, run_id)
+    if ref is None:
+        return sanic_json({"error": f"Run not found: {run_id}"}, status=404)
+    manifest = await asyncio.to_thread(read_mission_manifest, ref.run_dir)
+    if manifest is None:
+        return sanic_json({"error": f"No manifest for run: {run_id}"}, status=404)
+    return sanic_json(manifest)
+
+
+@app.get("/api/runs/<run_id:runid>/story")
+async def get_run_story(request, run_id: str):
+    """Markdown narration of run.jsonl, computed on request (never stored)."""
+    ref = await asyncio.to_thread(find_run, request.app, run_id)
+    if ref is None or not ref.log_path.exists():
+        return sanic_json({"error": f"Run not found: {run_id}"}, status=404)
+    story = await asyncio.to_thread(narrate_path, str(ref.log_path))
+    return raw_text(story, content_type="text/markdown; charset=utf-8")
+
+
+@app.post("/api/runs/<run_id:runid>/replay")
+async def replay_run(request, run_id: str):
+    """Re-execute a finished run against its own recording. $0: no worker runs."""
+    try:
+        ref = await asyncio.to_thread(find_run, request.app, run_id)
+        if ref is None or not ref.log_path.exists():
+            return sanic_json({"error": f"Run not found: {run_id}"}, status=404)
+
+        reap_mission_threads(request.app)
+        if is_managed_and_alive(request.app, run_id):
+            return sanic_json({"error": "Run is still running"}, status=409)
+
+        manifest = await asyncio.to_thread(read_mission_manifest, ref.run_dir)
+        if manifest is None:
+            return sanic_json({"error": "Run has no manifest; cannot replay"}, status=400)
+
+        if active_mission_count(request.app) >= MAX_CONCURRENT_MISSIONS:
+            return sanic_json(
+                {"error": f"Too many missions running (max {MAX_CONCURRENT_MISSIONS})"},
+                status=409,
+            )
+
+        target_repo = ref.target_repo
+        suffix = f"-replay-{int(time.time())}"
+        replay_slug = f"{ref.slug[: 64 - len(suffix)]}{suffix}"
+        replay_slug, slug_error = validate_slug(replay_slug)
+        if slug_error:
+            return sanic_json({"error": f"generated replay slug rejected: {slug_error}"}, status=400)
+
+        replay_dir = (target_repo / ".agentgraph" / "runs" / replay_slug).resolve()
+        if not replay_dir.is_relative_to(target_repo):
+            return sanic_json({"error": "resolved run directory escapes target_repo"}, status=400)
+        new_log_path = replay_dir / "run.jsonl"
+        if new_log_path.exists():
+            return sanic_json({"error": f"A replay run already exists for '{replay_slug}'"}, status=409)
+
+        await asyncio.to_thread(prepare_run_directory, replay_dir)
+
+        replay_manifest = dict(manifest)
+        replay_manifest = manifest_from_request(
+            slug=replay_slug,
+            agents=manifest.get("agents", []),
+            synthesis=manifest.get("synthesis"),
+            gate=manifest.get("gate"),
+            model=manifest.get("model", DEFAULT_MISSION_MODEL),
+            max_turns=manifest.get("max_turns", 30),
+            max_concurrency=manifest.get("max_concurrency", 4),
+            target_repo=manifest.get("target_repo", str(target_repo)),
+            kind="replay",
+            parent_run_id=run_id,
+        )
+        await asyncio.to_thread(write_mission_manifest, replay_dir, replay_manifest)
+
+        # The rebuilt mission must keep the *original* slug: request identity
+        # hashes over it, and a renamed mission is a guaranteed cache miss.
+        rebuild_manifest = dict(replay_manifest)
+        rebuild_manifest["slug"] = manifest.get("slug", ref.slug)
+        mission = await asyncio.to_thread(
+            mission_from_manifest, rebuild_manifest, run_dir=replay_dir
+        )
+
+        replay_run_id = compose_run_id(replay_slug, target_repo)
+        original_log_path = ref.log_path
+        stop_event = threading.Event()
+        entry = {
+            "thread": None,
+            "slug": replay_slug,
+            "run_dir": replay_dir,
+            "log_path": new_log_path,
+            "stop_event": stop_event,
+            "target_repo": str(target_repo),
+            "status": "running",
+            "error": None,
+        }
+
+        def replay_mission_thread():
+            try:
+                mission.replay(str(original_log_path), str(new_log_path))
+            except Exception as error:
+                entry["error"] = str(error)
+                print(f"Replay {replay_run_id} errored: {error}")
+            finally:
+                entry["status"] = "finished"
+
+        thread = threading.Thread(target=replay_mission_thread, name=f"replay-{replay_run_id}")
+        entry["thread"] = thread
+        request.app.ctx.mission_processes[replay_run_id] = entry
+        thread.start()
+
+        return sanic_json(
+            {
+                "run_id": replay_run_id,
+                "slug": replay_slug,
+                "parent_run_id": run_id,
+                "status": "replaying",
+                "log_path": str(new_log_path),
+                "target_repo": str(target_repo),
+            }
+        )
+    except Exception as error:
+        return sanic_json({"error": str(error)}, status=500)
+
+
+@app.delete("/api/runs/<run_id:runid>")
+async def delete_run(request, run_id: str):
+    """Remove a finished run: its directory on disk and its mirror rows."""
+    ref = await asyncio.to_thread(find_run, request.app, run_id)
+    if ref is None:
+        return sanic_json({"error": f"Run not found: {run_id}"}, status=404)
+
+    reap_mission_threads(request.app)
+    if is_managed_and_alive(request.app, run_id):
+        return sanic_json({"error": "Run is still running"}, status=409)
+
+    await asyncio.to_thread(shutil.rmtree, ref.run_dir, True)
+    async with request.app.ctx.mirror_lock:
+        await asyncio.to_thread(request.app.ctx.mirror.delete_run, run_id)
+    request.app.ctx.mission_processes.pop(run_id, None)
+    return empty_response(status=204)
+
+
 @app.get("/api/ping")
 @datastar_response
 async def ping(request):
@@ -510,7 +677,13 @@ def create_dry_run_worker(run_dir: Path, agent_names: list[str]):
         )
         return f"dry-run: {request.worker}"
 
-    return ScriptedWorker(dry_run_responder, delays={name: DRY_RUN_AGENT_SECONDS for name in agent_names})
+    # cost_usd=0: a dry run spends nothing, and the recorded zero is what a
+    # later $0 replay re-serves from the log.
+    return ScriptedWorker(
+        dry_run_responder,
+        delays={name: DRY_RUN_AGENT_SECONDS for name in agent_names},
+        cost_usd=Decimal("0"),
+    )
 
 
 def build_agent_specs(agent_data: list[dict]) -> list[AgentSpec]:
@@ -525,6 +698,51 @@ def build_agent_specs(agent_data: list[dict]) -> list[AgentSpec]:
         )
         for spec in agent_data
     ]
+
+
+def manifest_agents(agents: list[AgentSpec]) -> list[dict]:
+    """AgentSpec list -> the manifest's agent dicts (sdk defaults to "claude")."""
+    return [
+        {
+            "name": spec.name,
+            "brief": spec.brief,
+            "tools": list(spec.tools),
+            "sdk": spec.meta.get("sdk") or "claude",
+            "owns": list(spec.owns),
+        }
+        for spec in agents
+    ]
+
+
+def write_run_manifest(
+    run_dir: Path,
+    *,
+    slug: str,
+    agents: list[AgentSpec],
+    synthesis,
+    gate_spec,
+    model: str,
+    max_turns,
+    max_concurrency,
+    target_repo: Path,
+    kind: str,
+    parent_run_id: str | None = None,
+) -> dict:
+    """Build and persist mission.json so the run can replay/narrate itself later."""
+    manifest = manifest_from_request(
+        slug=slug,
+        agents=manifest_agents(agents),
+        synthesis=synthesis,
+        gate=gate_spec if isinstance(gate_spec, dict) else None,
+        model=model,
+        max_turns=max_turns,
+        max_concurrency=max_concurrency,
+        target_repo=str(target_repo),
+        kind=kind,
+        parent_run_id=parent_run_id,
+    )
+    write_mission_manifest(run_dir, manifest)
+    return manifest
 
 
 def resolve_mission_gate(gate_spec: object, target_repo: Path, agents: list[AgentSpec]):
@@ -675,6 +893,20 @@ async def launch_mission(request):
         worker, worker_error = resolve_mission_worker(run_dir, agents)
         if worker_error:
             return sanic_json({"error": worker_error}, status=400)
+
+        await asyncio.to_thread(
+            write_run_manifest,
+            run_dir,
+            slug=slug,
+            agents=agents,
+            synthesis=synthesis,
+            gate_spec=gate_spec,
+            model=DEFAULT_MISSION_MODEL,
+            max_turns=max_turns,
+            max_concurrency=max_concurrency,
+            target_repo=target_repo,
+            kind="mission",
+        )
 
         stop_event = threading.Event()
         entry = {
@@ -852,6 +1084,21 @@ async def resume_mission(request, run_id: str):
 
         resume_run_id = compose_run_id(resume_slug, target_repo)
         original_log_path = ref.log_path
+
+        await asyncio.to_thread(
+            write_run_manifest,
+            resume_dir,
+            slug=resume_slug,
+            agents=merged_agents,
+            synthesis=synthesis,
+            gate_spec=body.get("gate"),
+            model=DEFAULT_MISSION_MODEL,
+            max_turns=max_turns,
+            max_concurrency=max_concurrency,
+            target_repo=target_repo,
+            kind="resume",
+            parent_run_id=run_id,
+        )
 
         stop_event = threading.Event()
         entry = {

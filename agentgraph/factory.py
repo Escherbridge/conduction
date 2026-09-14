@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from agentgraph import gates
 from agentgraph.dispatcher import Worker
+from agentgraph.manifest import manifest_from_request, write_mission_manifest
 from agentgraph.mission import READ_TOOLS, AgentSpec, Mission
 
 SLUG_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -282,6 +283,23 @@ class FactoryRunner:
         specs = [self._agent_spec(agent) for agent in wave.agents]
         owns = {spec.name: tuple(spec.owns) for spec in specs}
         gate = gates.gate_from_spec(wave.gate, cwd=str(self.target_repo), owns=owns)
+
+        # The wave's run dir describes itself: replay/story/delete need no client.
+        write_mission_manifest(
+            run_dir,
+            manifest_from_request(
+                slug=f"{self.spec.slug}-{wave.slug}",
+                agents=list(wave.agents),
+                synthesis=wave.synthesis,
+                gate=dict(wave.gate or {}),
+                model=self.model,
+                max_turns=wave.max_turns,
+                max_concurrency=wave.max_concurrency,
+                target_repo=str(self.target_repo),
+                kind="factory-wave",
+                parent_run_id=self.factory_run_id,
+            ),
+        )
 
         if self.worker_factory is not None:
             worker = self.worker_factory(run_dir, specs)

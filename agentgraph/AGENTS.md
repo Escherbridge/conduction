@@ -68,10 +68,49 @@ The app treats this as the definitive mission outcome. A run without `mission.co
 
 **Rule**: emitted between quanta by hook or host → injected, or the window shifts. Produced by behavior or mission → not injected, because replay re-runs that code.
 
-## Worker Protocol and CLI Limits
+## Worker Protocol and SDK Routing
 
-**Worker**: a protocol (dispatcher.py:9) with `run()` async method. `ClaudeAgentWorker` calls the Claude SDK; `ScriptedWorker` reads deterministic scripts.
+**Worker**: a protocol (dispatcher.py:9) with `run()` async method. `ClaudeAgentWorker` calls the Claude SDK; `ScriptedWorker` reads deterministic scripts; `CliWorker` wraps external agent CLIs.
 
-**CliWorker limits** (sdk_workers.py): External CLIs (e.g., subagents spawned via subprocess) do **not** get MCP tools or the graph API. They run in a subprocess and can only read/write files and call built-in tools. Claims inside external CLIs are not enforced — the CLI has its own process boundary.
+**RoutingWorker** (sdk_workers.py:30–61): Dispatches each agent to a different Worker by name. Maps agent → (Copilot | Codex | Gemini | Claude) worker. No routing logic needed in Mission or dispatcher; the Dispatcher calls one router, which selects the worker per request (sdk_workers.py: `resolve_workers`, `make_worker`, `available_sdks`).
 
-**No MCP/claims inside external CLIs**: Workers using CliWorker must not include GRAPH_TOOL_NAMES in their allowed_tools, or the tools will be unavailable and the code will error. This is deliberate: external processes cannot participate in the claim ledger or the blackboard.
+**CliWorker limits**: External CLIs (Copilot, Codex, Gemini) run in subprocess, **no MCP tools or graph API**. Claims inside external CLIs are not enforced — the CLI has its own boundary. Tool name mappings live in `TOOL_NAME_MAP` (sdk_workers.py:225–249); Claude columns are the source of truth; other SDKs are documented as unknown until verified against actual tool --help output.
+
+**Agents need a shell to self-verify**: An agent can read git output (e.g., `git diff`, `git status`) to examine its own changes, but must shell-escape the paths and cannot rely on file handles from a prior step (shebangs get re-invoked, file state is not shared across tool calls).
+
+## Gate Presets
+
+**Gate** (agentgraph/gates.py: `gate_from_spec`) builds deterministic host-side checks from a spec dict. Presets (agentgraph/gates.py:111–159):
+
+- **pytest**: Run `python -m pytest [args]` with optional python binary and timeout (default: 1200 s). Reports last ~8 lines of stdout.
+- **command**: Run `argv` with optional timeout (default: 600 s). Reports exit code or last 500 chars of stdout/stderr.
+- **probe**: Start a server (argv), poll `ready_path` (default: /), then GET each route. Picks a free port, sets `port_env` (default: PORT). All routes must 200 (agentgraph/gates.py:228–315).
+- **owns**: Validate that all changed files (git status) are under agent ownership paths. Filters `.agentgraph/` (agentgraph/gates.py:318–374).
+
+`validate_gate_spec` (agentgraph/gates.py:35–108) rejects unknown keys and type mismatches. An empty spec returns a gate that passes with zero checks.
+
+## Manifest and Replay (Contract Item 1)
+
+**manifest.py** (NOT YET WRITTEN — describe contract):
+- `write_mission_manifest(run_dir, manifest)`: Atomic write to `mission.json` (temp + os.replace).
+- `read_mission_manifest(run_dir)`: Read `mission.json`, return dict | None.
+- `manifest_from_request(*, slug, agents: list[dict], synthesis, gate: dict, model, max_turns, max_concurrency, target_repo, kind: str = "mission", parent_run_id: str | None)`: Build manifest dict with schema version, kind, agents with tools/owns, created_at ISO-8601.
+- `mission_from_manifest(manifest, *, run_dir, gate_callable=None)`: Rebuild AgentSpec list (tools and owns as tuples, meta.sdk only when present). Rebuild Mission with exact same cwd, model, max_turns, max_concurrency. Specs must hash to same identity or replay raises ReplayCacheMiss.
+
+Schema (version 1): `{"schema": 1, "kind": "mission"|"resume"|"replay"|"factory-wave", "slug", "agents": [{name, brief, tools: [...], owns: [...], sdk: ...}], "synthesis", "gate": {...}, "model", "max_turns", "max_concurrency", "target_repo", "parent_run_id", "created_at": ISO-8601}`.
+
+## Factory Waves and State
+
+**FactoryWave** (agentgraph/factory.py:29–37): One wave = agents + gate + synthesis + max_turns/max_concurrency. Loaded from `factory.json`.
+
+**FactoryRunState** (agentgraph/factory.py:50–70): Persists to `<target_repo>/.agentgraph/factory-runs/<factory_run_id>/state.json`. Tracks current_wave, per-wave status, gate_passed, agents_failed. Resumable: `FactoryRunner.run(start_wave=N)` skips prior waves if they already passed.
+
+**FactoryRunner** (agentgraph/factory.py:173–303): Executes each wave in order, halts on first gate failure. Routes per-agent `sdk` choices via `_resolve_sdk_worker()` → `sdk_workers.resolve_workers()`. Writes a manifest (kind "factory-wave") before each wave (agentgraph/factory.py:280–303). Test with CONDUCTION_DRY_RUN=1.
+
+## SQLite Mirror and Deletion
+
+**SqliteMirror.delete_run(run_id)** (NOT YET WRITTEN — contract item 2): One transaction, delete from runs, agents, events, findings, claims where run_id matches. Called by `DELETE /api/runs/<id>` (409 if running).
+
+## JSONL Envelope Trap
+
+**EVERY LINE is wrapped**: `{"seq": n, "run_id": "...", "event": {...event...}}`. The event payload is under the "event" key. Code that checks `line["type"]` at the top level silently matches nothing. Always unwrap first: `envelope.get("event", envelope)` or use `agentgraph.log.read_envelopes` / `read_events` (log.py).

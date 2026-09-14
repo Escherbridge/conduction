@@ -339,6 +339,12 @@ class SqliteMirror:
         for table in ("events", "agents", "findings", "claims", "violations", "runs", "mirror_state"):
             conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
 
+    def delete_run(self, run_id: str) -> None:
+        """Drop every mirrored row for one run, including its mirror offset."""
+        conn = self._ensure_open()
+        with conn:
+            self._reset_run_rows(conn, run_id)
+
     def mirror_log_file(self, run_id: str, jsonl_path: str | Path, target_repo: str | None = None) -> int:
         """Incrementally mirror new lines appended to a JSONL log file.
 

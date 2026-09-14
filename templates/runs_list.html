@@ -86,15 +86,19 @@
                     const repoName = repoBasename(run.target_repo);
                     const encodedRunId = encodeURIComponent(run.run_id);
                     const statusLabel = run.status || 'running';
+                    const kind = run.kind || 'legacy';
+                    const parentRunId = run.parent_run_id;
 
                     return `
                         <div class="run-item">
                             <div>
                                 <a href="/runs/${encodedRunId}">${escapeHtml(slugPart)}</a>
                                 <div class="run-item-badges">
+                                    <span class="kind-badge kind-${escapeHtml(kind)}">${escapeHtml(kind)}</span>
                                     ${repoName ? `<span class="repo-badge" title="${escapeHtml(run.target_repo)}">${escapeHtml(repoName)}</span>` : ''}
                                     ${repoKey ? `<span class="repo-key-badge" title="repo key">${escapeHtml(repoKey)}</span>` : ''}
                                 </div>
+                                ${kind === 'replay' && parentRunId ? `<div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">$0 replay of <a href="/runs/${encodeURIComponent(parentRunId)}" style="color: #667eea;">${escapeHtml(parentRunId)}</a></div>` : ''}
                             </div>
                             <div class="run-meta">
                                 <span>${run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</span>
