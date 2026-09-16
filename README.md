@@ -129,7 +129,7 @@ delivery is signed — see [SECURITY.md](SECURITY.md#webhooks).
 
 ```bash
 python -m pip install -r requirements.txt -r requirements-dev.txt
-python -m pytest tests -q            # ~257 tests, ~2m40s
+python -m pytest tests -q            # ~270 tests, ~4m
 ruff check . && ruff format --check .
 ```
 
@@ -137,8 +137,9 @@ Tests come in two lanes: most spawn a real `app.py` subprocess, while newer ones
 run in-process against the module directly. New tests should prefer the fast
 lane and leave the subprocess lane for genuine boot behaviour.
 
-`agentgraph/` is a **vendored copy** of the mission engine and is excluded from
-formatting so it does not diverge from upstream.
+`agentgraph/` is a **vendored copy** of the mission engine. Its modules are
+excluded from formatting file by file, so they do not diverge from upstream
+while anything added there (`agentgraph/procs.py`) is linted like the rest.
 
 PowerShell scripts target Windows PowerShell 5.1, so they avoid `&&`, ternaries
 and `??`.
@@ -149,6 +150,9 @@ and `??`.
 - **Engine** — `agentgraph/`: missions, claims, gates, manifests, replay, SDK workers
 - **API** — blueprints in `routes/` (config, observe, scheduler, filesystem)
 - **Access** — `access.py`: request scope and the remote allowlist
+- **Process lifecycle** — `agentgraph/procs.py`: children are tracked per run,
+  killed as a tree on interrupt and shutdown, and held by an OS-level job so a
+  hard-killed server cannot orphan them
 - **Streaming** — SSE for live run events
 
 The front end is being migrated to a Svelte SPA that Sanic serves; the Jinja

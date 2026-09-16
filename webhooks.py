@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json as stdlib_json
 import os
@@ -98,39 +99,77 @@ def project_webhooks_trusted() -> bool:
     return os.environ.get("CONDUCTION_TRUST_PROJECT_WEBHOOKS", "0").strip() == "1"
 
 
-def destination_allowed(url: str) -> bool:
-    """Refuse a URL that resolves to an address this host reaches privately.
+def address_is_private(raw: str) -> bool:
+    """Is this a destination the host can only reach privately?"""
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return True
+    address = getattr(address, "ipv4_mapped", None) or address
+    return bool(
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
+def resolve_public(url: str) -> str | None:
+    """The one public IP this URL may be delivered to, or None to refuse.
 
     Applied to REPO-SUPPLIED subscriptions only. A subscription pointed at
     loopback, the LAN or the tailnet turns the notifier into a proxy for
     networks its author cannot otherwise touch -- including this app's own
     local-scope API. You may legitimately point your OWN ecosystem webhooks at
-    a service on this machine, so that case is trusted; a URL that arrived
-    inside a cloned repository is not.
+    a service on this machine; a URL that arrived inside a cloned repository is
+    not trusted that far.
+
+    Returns the ADDRESS, not a yes/no, because checking and then connecting by
+    hostname resolves twice: a DNS server the attacker controls can answer
+    public for the check and 127.0.0.1 for the delivery. The caller connects to
+    exactly what was verified.
     """
     hostname = urlsplit(url).hostname
     if not hostname:
-        return False
+        return None
     try:
         infos = socket.getaddrinfo(hostname, None)
     except OSError:
-        return False
+        return None
+    if not infos:
+        return None
+    chosen = None
     for info in infos:
+        raw = info[4][0]
+        if address_is_private(raw):
+            return None
+        if chosen is None:
+            chosen = raw
+    return chosen
+
+
+def destination_allowed(url: str) -> bool:
+    """Whether a repo-supplied subscription may be delivered at all."""
+    return resolve_public(url) is not None
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS to a pre-verified IP, presenting the original hostname.
+
+    TLS verification and the Host header still use the real hostname, so the
+    certificate check is unchanged; only the address dialled is pinned.
+    """
+
+    pinned_ip = None
+
+    def connect(self):
+        host, self.host = self.host, self.pinned_ip or self.host
         try:
-            address = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        address = getattr(address, "ipv4_mapped", None) or address
-        if (
-            address.is_loopback
-            or address.is_private
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-        ):
-            return False
-    return True
+            super().connect()
+        finally:
+            self.host = host
 
 
 class NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -142,6 +181,29 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
 
 
 _opener = urllib.request.build_opener(NoRedirects)
+
+
+def _pinned_opener(ip: str):
+    """An opener that dials `ip` and nothing else, redirects still refused."""
+
+    class _Connection(PinnedHTTPSConnection):
+        pinned_ip = ip
+
+    class _HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_Connection, req)
+
+    class _HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            def build(host, **kwargs):
+                kwargs.pop("context", None)
+                connection = http.client.HTTPConnection(ip, **kwargs)
+                connection._real_host = host
+                return connection
+
+            return self.do_open(build, req)
+
+    return urllib.request.build_opener(NoRedirects, _HTTPSHandler, _HTTPHandler)
 
 
 def subscription_matches(entry: dict, event: str, target_repo: str | None) -> bool:
@@ -221,7 +283,8 @@ def deliver(entry: dict, event: str, payload: dict) -> dict:
         headers[SIGNATURE_HEADER] = sign(secret, body)
 
     url = entry.get("url", "")
-    if entry.get(SOURCE_KEY) == SOURCE_PROJECT and not destination_allowed(url):
+    untrusted = entry.get(SOURCE_KEY) == SOURCE_PROJECT
+    if untrusted and resolve_public(url) is None:
         return {
             "url": url,
             "ok": False,
@@ -230,9 +293,22 @@ def deliver(entry: dict, event: str, payload: dict) -> dict:
         }
     last_error = ""
     for attempt in range(MAX_ATTEMPTS):
+        opener = _opener
+        if untrusted:
+            # Re-resolve per attempt: a lookup that changes between retries must
+            # fail closed rather than inherit the first attempt's verdict.
+            pinned = resolve_public(url)
+            if pinned is None:
+                return {
+                    "url": url,
+                    "ok": False,
+                    "error": "destination stopped resolving to a public address",
+                    "attempts": attempt + 1,
+                }
+            opener = _pinned_opener(pinned)
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with _opener.open(request, timeout=DELIVERY_TIMEOUT_SECONDS) as response:
+            with opener.open(request, timeout=DELIVERY_TIMEOUT_SECONDS) as response:
                 return {"url": url, "ok": True, "status": response.status, "attempts": attempt + 1}
         except urllib.error.HTTPError as error:
             last_error = f"HTTP {error.code}"

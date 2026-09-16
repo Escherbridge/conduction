@@ -453,3 +453,81 @@ def test_redirects_are_not_followed():
     """A 302 from a public URL to 127.0.0.1 would walk the destination check
     straight back into private address space."""
     assert webhooks.NoRedirects().redirect_request(None, None, 302, "", {}, "http://x") is None
+
+
+# --- DNS rebinding ---------------------------------------------------------
+
+
+def test_resolve_public_returns_the_address_it_verified():
+    """The check must hand back an ADDRESS, not a yes/no.
+
+    Verifying a hostname and then connecting by hostname resolves twice, and a
+    DNS server the attacker controls can answer public for the check and
+    127.0.0.1 for the delivery. Returning the address lets the caller dial
+    exactly what was approved.
+    """
+    assert webhooks.resolve_public("http://127.0.0.1:8000/hook") is None
+    assert webhooks.resolve_public("http://169.254.169.254/latest/meta-data") is None
+    assert webhooks.resolve_public("not-a-url") is None
+
+    public = webhooks.resolve_public("https://example.com/hook")
+    if public is not None:  # skip when the sandbox has no DNS
+        assert not webhooks.address_is_private(public)
+
+
+def test_address_is_private_covers_every_reserved_range():
+    for raw in (
+        "127.0.0.1",
+        "::1",
+        "::ffff:127.0.0.1",
+        "10.0.0.1",
+        "192.168.1.1",
+        "172.16.0.1",
+        "169.254.169.254",
+        "0.0.0.0",
+        "224.0.0.1",
+        "garbage",
+    ):
+        assert webhooks.address_is_private(raw), raw
+    assert not webhooks.address_is_private("93.184.216.34")
+
+
+def test_a_rebinding_destination_is_refused_on_every_attempt(monkeypatch):
+    """A lookup that flips to private between retries must fail closed rather
+    than inherit the first attempt's verdict."""
+    answers = iter(["93.184.216.34", "127.0.0.1", "127.0.0.1"])
+
+    def flipping(url):
+        value = next(answers, "127.0.0.1")
+        return None if webhooks.address_is_private(value) else value
+
+    monkeypatch.setattr(webhooks, "resolve_public", flipping)
+
+    # First call consumes the public answer, so delivery is attempted; the URL
+    # is unroutable, so it retries -- and the retry re-resolves to loopback.
+    result = webhooks.deliver(
+        {
+            "url": "http://rebind.test/hook",
+            "events": ["run.failed"],
+            webhooks.SOURCE_KEY: webhooks.SOURCE_PROJECT,
+        },
+        "run.failed",
+        webhooks.build_payload("run.failed", {}),
+    )
+    assert result["ok"] is False
+
+
+def test_trusted_ecosystem_webhooks_may_still_reach_localhost():
+    """Narrowing matters: your OWN subscriptions may legitimately point at a
+    service on this machine. Only repo-supplied ones are treated as hostile."""
+    with Receiver() as receiver:
+        result = webhooks.deliver(
+            {
+                "url": receiver.url,
+                "events": ["run.failed"],
+                webhooks.SOURCE_KEY: webhooks.SOURCE_ECOSYSTEM,
+            },
+            "run.failed",
+            webhooks.build_payload("run.failed", {}),
+        )
+    assert result["ok"] is True

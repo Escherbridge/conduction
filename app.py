@@ -22,7 +22,7 @@ from sanic.response import json as sanic_json
 from sanic.response import text as raw_text
 
 import webhooks
-from agentgraph import AgentSpec, Mission, policy
+from agentgraph import AgentSpec, Mission, policy, procs
 from agentgraph.dispatcher import ScriptedWorker
 from agentgraph.factory import (
     FactoryRunner,
@@ -414,6 +414,12 @@ async def stop_missions(app):
     ]
     if threads:
         await asyncio.to_thread(join_mission_threads, threads, MISSION_JOIN_TIMEOUT_SECONDS)
+    # The join is bounded; a gate with a 600 s timeout outlives it by twenty
+    # minutes. Kill anything the missions spawned rather than leave it running
+    # with nothing left to reap it.
+    swept = await asyncio.to_thread(procs.sweep_all)
+    if swept:
+        print(f"swept {swept} child process(es) left by missions")
 
 
 environment = Environment(loader=FileSystemLoader(APP_ROOT / "templates"), autoescape=True)
@@ -892,6 +898,7 @@ async def replay_run(request, run_id: str):
         }
 
         def replay_mission_thread():
+            procs.bind_run(replay_run_id)
             try:
                 mission.replay(str(original_log_path), str(new_log_path))
             except Exception as error:
@@ -1290,6 +1297,7 @@ async def launch_from_body(request, body: dict):
         }
 
         def run_mission_thread():
+            procs.bind_run(run_id)
             failure = None
             try:
                 mission.run(str(log_path), worker=worker, stop_when=stop_event.is_set)
@@ -1368,8 +1376,18 @@ async def interrupt_mission(request, run_id: str):
             "utf-8",
         )
 
+        # Setting the flag alone is not an interrupt. Stopping is cooperative --
+        # host.run checks it between quanta -- so a thread blocked in a gate's
+        # subprocess never sees it and the child outlives the request. The flag
+        # stops new work; killing the children stops the work already in flight.
+        killed = await asyncio.to_thread(procs.terminate_run, run_id)
+
         return sanic_json(
-            {"run_id": run_id, "will_stop_after": "current agent completions"},
+            {
+                "run_id": run_id,
+                "will_stop_after": "current agent completions",
+                "children_stopped": killed,
+            },
             status=202,
         )
 
@@ -1507,6 +1525,7 @@ async def resume_mission(request, run_id: str):
         }
 
         def resume_mission_thread():
+            procs.bind_run(resume_run_id)
             try:
                 mission.resume(
                     str(original_log_path),
@@ -1646,6 +1665,7 @@ def start_factory_thread(
     )
 
     def run_factory_thread():
+        procs.bind_run(factory_run_id)
         try:
             runner.run(start_wave=start_wave)
         except Exception as error:
@@ -1802,8 +1822,16 @@ async def interrupt_factory(request, factory_run_id: str):
             status=409,
         )
     entry["stop_event"].set()
+    # Same reasoning as the mission interrupt: the flag stops the next wave,
+    # killing the children stops the wave already running.
+    killed = await asyncio.to_thread(procs.terminate_run, factory_run_id)
     return sanic_json(
-        {"factory_run_id": factory_run_id, "will_stop_after": "current wave"}, status=202
+        {
+            "factory_run_id": factory_run_id,
+            "will_stop_after": "current wave",
+            "children_stopped": killed,
+        },
+        status=202,
     )
 
 

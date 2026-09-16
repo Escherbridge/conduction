@@ -89,8 +89,16 @@ repository you clone can ship webhook subscriptions. Conduction therefore
 ignores repo-supplied webhooks unless you set
 `CONDUCTION_TRUST_PROJECT_WEBHOOKS=1`, and even then refuses destinations that
 resolve to loopback, private, link-local or reserved addresses, and does not
-follow redirects. Your own subscriptions in `ecosystem.json` are trusted and
-may point anywhere, including services on your own machine.
+follow redirects.
+
+Checking a hostname and then connecting to that hostname resolves DNS twice, so
+a name server the attacker controls could answer public for the check and
+`127.0.0.1` for the delivery. Conduction therefore **connects to the address it
+verified**, presenting the original hostname for TLS and the `Host` header, and
+re-resolves on every retry so a lookup that changes mid-flight fails closed.
+
+Your own subscriptions in `ecosystem.json` are trusted and may point anywhere,
+including services on your own machine.
 
 Note that a cloned repository's `project.json` also supplies **policy rules**,
 which are prepended to every agent brief. Treat a repo you did not write as

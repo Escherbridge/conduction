@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+
+from agentgraph import procs
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Protocol
@@ -439,6 +441,7 @@ class CliWorker:
             transcript.begin(request.worker, request.prompt, argv[0])
 
         started = time.monotonic()
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -447,7 +450,9 @@ class CliWorker:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=request.cwd if self._cwd_from_request else None,
                 env={**os.environ, **self._env} if self._env else None,
+                **procs.spawn_kwargs(),
             )
+            procs.register(process.pid)
             stdout, stderr = await process.communicate(
                 request.prompt.encode("utf-8") if uses_stdin else None
             )
@@ -459,6 +464,14 @@ class CliWorker:
             if transcript is not None:
                 transcript.result(response)
             return response
+        finally:
+            # BaseException, not Exception: host.run cancels in-flight tasks when
+            # a mission stops, and CancelledError would otherwise sail past the
+            # handler above and leave this CLI running unattended.
+            if process is not None:
+                if process.returncode is None:
+                    procs.terminate_tree(process.pid)
+                procs.unregister(process.pid)
 
         latency = time.monotonic() - started
         out = stdout.decode("utf-8", errors="replace").strip()

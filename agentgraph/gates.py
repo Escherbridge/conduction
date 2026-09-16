@@ -27,6 +27,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from agentgraph import procs
+
 from agentgraph.mission import GateContext, GateResult
 
 KNOWN_GATE_KEYS = ("pytest", "command", "probe", "owns")
@@ -159,6 +161,31 @@ def gate_from_spec(
     return gate
 
 
+def _run_tracked(argv, *, cwd, timeout):
+    """subprocess.run, but the child is registered and killed as a tree.
+
+    `subprocess.run` reaps on return and on timeout, which is why gates looked
+    clean. What it cannot do is notice a mission being interrupted: stopping is
+    cooperative and this thread is blocked here. Registering the pid lets
+    `procs.terminate_run` reach it from the outside.
+    """
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **procs.spawn_kwargs(),
+    )
+    with procs.tracked_process(process):
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            procs.terminate_tree(process.pid)
+            raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def _make_pytest_check(
     cwd: str, config: dict[str, Any]
 ) -> Callable[[GateContext], dict[str, Any]]:
@@ -169,13 +196,7 @@ def _make_pytest_check(
 
     def check(context: GateContext) -> dict[str, Any]:
         try:
-            proc = subprocess.run(
-                [python, "-m", "pytest", *args],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            proc = _run_tracked([python, "-m", "pytest", *args], cwd=cwd, timeout=timeout)
             # Show the last ~8 lines as the orchestrator does
             tail = "\n".join(proc.stdout.strip().splitlines()[-8:]) if proc.stdout else ""
             return {"name": "pytest", "ok": proc.returncode == 0, "detail": tail}
@@ -200,13 +221,7 @@ def _make_command_check(
 
     def check(context: GateContext) -> dict[str, Any]:
         try:
-            proc = subprocess.run(
-                argv,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            proc = _run_tracked(argv, cwd=cwd, timeout=timeout)
             detail = proc.stdout.strip() if proc.stdout else proc.stderr.strip()
             return {
                 "name": "command",
@@ -250,7 +265,9 @@ def _make_probe_check(
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                **procs.spawn_kwargs(),
             )
+            procs.register(server.pid)
 
             # Wait for the server to become ready
             base = f"http://127.0.0.1:{port}"
@@ -303,14 +320,12 @@ def _make_probe_check(
             return {"name": "probe", "ok": False, "detail": f"error: {exc}"}
 
         finally:
-            # ALWAYS terminate the Popen we started, never by name
+            # ALWAYS end the Popen we started, never by name -- and as a TREE.
+            # terminate() reaches the direct child only, so a dev server that
+            # forks workers would leak every one of them.
             if server is not None:
-                server.terminate()
-                try:
-                    server.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    server.kill()
-                    server.wait()
+                procs.terminate_tree(server.pid)
+                procs.unregister(server.pid)
 
     return check
 
@@ -323,12 +338,8 @@ def _make_owns_check(
     def check(context: GateContext) -> dict[str, Any]:
         try:
             # Get changed files from git
-            proc = subprocess.run(
-                ["git", "status", "--porcelain", "-uall"],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=10,
+            proc = _run_tracked(
+                ["git", "status", "--porcelain", "-uall"], cwd=cwd, timeout=10
             )
 
             # Parse changed paths

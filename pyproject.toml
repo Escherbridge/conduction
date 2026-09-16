@@ -5,11 +5,31 @@ line-length = 100
 target-version = "py312"
 exclude = [
     "venv", ".venv", "__pycache__", ".agentgraph",
-    # agentgraph/ is a VENDORED copy of the engine (see tests/conftest.py).
-    # Reformatting it would diverge this copy from upstream for zero benefit --
-    # 18 files and ~300 lines of churn in code we did not write. Revisit if the
-    # copy is ever declared a hard fork.
-    "agentgraph",
+    # The VENDORED engine modules (see tests/conftest.py). Reformatting them
+    # would diverge this copy from upstream for zero benefit. Listed file by
+    # file rather than as a directory so anything WE add under agentgraph/ --
+    # procs.py, for one -- is linted like the rest of the repo.
+    "agentgraph/__init__.py",
+    "agentgraph/agentcache.py",
+    "agentgraph/behaviors.py",
+    "agentgraph/claims.py",
+    "agentgraph/context.py",
+    "agentgraph/dispatcher.py",
+    "agentgraph/events.py",
+    "agentgraph/factory.py",
+    "agentgraph/gates.py",
+    "agentgraph/host.py",
+    "agentgraph/log.py",
+    "agentgraph/manifest.py",
+    "agentgraph/mcp_tools.py",
+    "agentgraph/mission.py",
+    "agentgraph/narrate.py",
+    "agentgraph/policy.py",
+    "agentgraph/replay.py",
+    "agentgraph/sdk_workers.py",
+    "agentgraph/sqlite_sink.py",
+    "agentgraph/transcript.py",
+    "agentgraph/workerapi.py",
     # Dead and broken: imported nowhere, and ruff finds a real syntax error
     # (ForeignKey=(...)) plus typos (delete-orpha, alingment). Delete or fix it;
     # until then it is not worth failing every lint run over.
