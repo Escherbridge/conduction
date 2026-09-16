@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json as stdlib_json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sanic import Blueprint
 from sanic.response import json as sanic_json
@@ -50,7 +50,7 @@ def _app_module():
 
 
 def _utc_today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def _payload(raw: str | None) -> dict:
@@ -163,16 +163,10 @@ async def observe_summary(request):
         WHERE type IN ('command.violated', 'claim.violated')
           AND ts >= ?
         """,
-        (
-            datetime.fromtimestamp(time.time() - 86400, tz=timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z"),
-        ),
+        (datetime.fromtimestamp(time.time() - 86400, tz=UTC).isoformat().replace("+00:00", "Z"),),
     )
 
-    gate_pass_rate = (
-        None if not gated_recent else round(sum(gated_recent) / len(gated_recent), 4)
-    )
+    gate_pass_rate = None if not gated_recent else round(sum(gated_recent) / len(gated_recent), 4)
 
     return sanic_json(
         {
@@ -322,9 +316,7 @@ async def observe_feed(request):
 
         for row in fresh:
             try:
-                await response.send(
-                    f"event: activity\ndata: {stdlib_json.dumps(row)}\n\n"
-                )
+                await response.send(f"event: activity\ndata: {stdlib_json.dumps(row)}\n\n")
             except Exception:
                 return
 

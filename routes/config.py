@@ -14,7 +14,6 @@ from sanic import Blueprint
 from sanic.response import json as sanic_json
 
 from agentgraph import policy
-
 from routes.scheduler import (
     collect_schedules,
     find_schedule,
@@ -69,12 +68,59 @@ def resolve_repo_key(key: str) -> Path | None:
     return None
 
 
+def redact_secrets(doc: dict) -> dict:
+    """Replace webhook secrets with a boolean before a document leaves the app.
+
+    Documents are otherwise returned verbatim, so a credential inside one is
+    readable by anyone who can call the endpoint. See AGENTS.md "webhooks".
+    """
+    entries = doc.get("webhooks")
+    if not isinstance(entries, list):
+        return doc
+    doc["webhooks"] = [
+        {**entry, "secret_set": bool(entry.get("secret")), "secret": None}
+        if isinstance(entry, dict)
+        else entry
+        for entry in entries
+    ]
+    return doc
+
+
+def restore_secrets(incoming: dict, stored: dict) -> dict:
+    """Carry secrets the client never saw back into a document it is replacing.
+
+    The UI GETs a document, edits one field and PUTs the whole thing back. Since
+    GET redacts secrets, a naive write would blank every one of them the first
+    time someone edits an unrelated goal -- redaction must not become deletion.
+    A caller that sends a non-empty secret is setting it deliberately.
+    """
+    entries = incoming.get("webhooks")
+    if not isinstance(entries, list):
+        return incoming
+    by_url = {
+        entry.get("url"): entry.get("secret")
+        for entry in stored.get("webhooks") or []
+        if isinstance(entry, dict)
+    }
+    merged = []
+    for entry in entries:
+        if isinstance(entry, dict) and not entry.get("secret"):
+            entry = {**entry, "secret": by_url.get(entry.get("url"))}
+            entry.pop("secret_set", None)
+            if entry.get("secret") is None:
+                entry.pop("secret", None)
+        merged.append(entry)
+    incoming["webhooks"] = merged
+    return incoming
+
+
 @bp.get("/api/ecosystem")
 async def get_ecosystem(request):
     """The ecosystem-wide rules/goals/schedules document."""
     from app import ECOSYSTEM_ROOT
 
-    return sanic_json(await asyncio.to_thread(policy.load_ecosystem, ECOSYSTEM_ROOT))
+    doc = dict(await asyncio.to_thread(policy.load_ecosystem, ECOSYSTEM_ROOT))
+    return sanic_json(redact_secrets(doc))
 
 
 @bp.put("/api/ecosystem")
@@ -86,11 +132,14 @@ async def put_ecosystem(request):
     if not isinstance(data, dict):
         return sanic_json({"errors": ["body must be a JSON object"]}, status=400)
     data.setdefault("schema", 1)
+    stored = await asyncio.to_thread(policy.load_ecosystem, ECOSYSTEM_ROOT)
+    data = restore_secrets(dict(data), stored)
     errors = policy.validate_ecosystem(data)
     if errors:
         return sanic_json({"errors": list(errors)}, status=400)
     await asyncio.to_thread(policy.save_ecosystem, ECOSYSTEM_ROOT, data)
-    return sanic_json(await asyncio.to_thread(policy.load_ecosystem, ECOSYSTEM_ROOT))
+    saved = dict(await asyncio.to_thread(policy.load_ecosystem, ECOSYSTEM_ROOT))
+    return sanic_json(redact_secrets(saved))
 
 
 @bp.get("/api/projects")
@@ -128,11 +177,11 @@ async def get_project(request, key: str):
     """One project's document, plus the repo it belongs to."""
     repo = await asyncio.to_thread(resolve_repo_key, key)
     if repo is None:
-        return sanic_json({"error": "Unknown project: %s" % key}, status=404)
+        return sanic_json({"error": f"Unknown project: {key}"}, status=404)
     project = dict(await asyncio.to_thread(policy.load_project, repo))
     project["target_repo"] = str(repo)
     project["repo_key"] = key
-    return sanic_json(project)
+    return sanic_json(redact_secrets(project))
 
 
 @bp.put("/api/projects/<key:str>")
@@ -140,7 +189,7 @@ async def put_project(request, key: str):
     """Replace one project's document (validated; 400 lists every problem)."""
     repo = await asyncio.to_thread(resolve_repo_key, key)
     if repo is None:
-        return sanic_json({"error": "Unknown project: %s" % key}, status=404)
+        return sanic_json({"error": f"Unknown project: {key}"}, status=404)
     data = request.json
     if not isinstance(data, dict):
         return sanic_json({"errors": ["body must be a JSON object"]}, status=400)
@@ -149,6 +198,7 @@ async def put_project(request, key: str):
     data.pop("repo_key", None)
     data.setdefault("schema", 1)
     data.setdefault("name", repo.name)
+    data = restore_secrets(data, await asyncio.to_thread(policy.load_project, repo))
     errors = policy.validate_project(data)
     if errors:
         return sanic_json({"errors": list(errors)}, status=400)
@@ -156,7 +206,7 @@ async def put_project(request, key: str):
     saved = dict(await asyncio.to_thread(policy.load_project, repo))
     saved["target_repo"] = str(repo)
     saved["repo_key"] = key
-    return sanic_json(saved)
+    return sanic_json(redact_secrets(saved))
 
 
 @bp.get("/api/schedules")
@@ -186,10 +236,8 @@ async def run_schedule_now(request, schedule_id: str):
         lambda: find_schedule(ECOSYSTEM_ROOT, repos_to_scan(), schedule_id)
     )
     if item is None:
-        return sanic_json({"error": "Unknown schedule: %s" % schedule_id}, status=404)
-    payload, error, status = await asyncio.to_thread(
-        launch_schedule_blocking, request.app, item
-    )
+        return sanic_json({"error": f"Unknown schedule: {schedule_id}"}, status=404)
+    payload, error, status = await asyncio.to_thread(launch_schedule_blocking, request.app, item)
     if error:
         return sanic_json({"error": error}, status=status)
     return sanic_json(payload)

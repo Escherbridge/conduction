@@ -87,7 +87,7 @@
 
 {% block scripts %}
 <script>
-const { escapeHtml, fetchJson, pill, fmtAgo } = window.Conduction;
+const { escapeHtml, fetchJson, pill, fmtAgo, toast } = window.Conduction;
 
 let ecosystemData = null;
 
@@ -147,7 +147,13 @@ async function updateEcosystemRule(idx) {
 }
 
 async function deleteEcosystemRule(idx) {
-    if (!confirm('Delete this ecosystem rule?')) return;
+    const confirmed = await window.Conduction.confirmDialog({
+        title: 'Delete ecosystem rule',
+        message: 'This rule stops applying to every future run in every project. Runs already recorded keep the rule they ran under.',
+        confirmLabel: 'Delete rule',
+        danger: true
+    });
+    if (!confirmed) return;
     ecosystemData.rules.splice(idx, 1);
     await saveEcosystem();
 }
@@ -191,47 +197,58 @@ function renderEcosystemGoals() {
     });
 }
 
-function editEcosystemGoal(goalId) {
+const GOAL_STATUSES = [
+    { value: 'open', label: 'Open' },
+    { value: 'done', label: 'Done' },
+    { value: 'blocked', label: 'Blocked' }
+];
+
+/* One form with every field visible, instead of three chained window.prompt()
+   calls you could not review or back out of. Resolves null when cancelled. */
+function goalDialog(goal) {
+    return window.Conduction.formDialog({
+        title: goal ? 'Edit goal' : 'New goal',
+        submitLabel: goal ? 'Save goal' : 'Add goal',
+        fields: [
+            { name: 'title', label: 'Title', required: true, value: goal ? goal.title : '' },
+            { name: 'description', label: 'Description', type: 'textarea', rows: 3,
+              value: goal ? (goal.description || '') : '' },
+            { name: 'status', label: 'Status', type: 'select', options: GOAL_STATUSES,
+              value: goal ? goal.status : 'open' }
+        ]
+    });
+}
+async function editEcosystemGoal(goalId) {
     const goal = ecosystemData.goals.find(g => g.id === goalId);
     if (!goal) return;
 
-    const newTitle = prompt('Goal title:', goal.title);
-    if (newTitle === null) return;
+    const values = await goalDialog(goal);
+    if (!values) return;
 
-    const newDesc = prompt('Description:', goal.description || '');
-    if (newDesc === null) return;
-
-    const newStatus = prompt('Status (open/done/blocked):', goal.status);
-    if (!['open', 'done', 'blocked'].includes(newStatus)) {
-        alert('Invalid status');
-        return;
-    }
-
-    goal.title = newTitle;
-    goal.description = newDesc;
-    goal.status = newStatus;
-    goal.updated_at = new Date().toISOString();
-
-    saveEcosystem();
+    Object.assign(goal, {
+        title: values.title,
+        description: values.description,
+        status: values.status,
+        updated_at: new Date().toISOString()
+    });
+    await saveEcosystem('Goal updated');
 }
 
 async function addEcosystemGoal() {
-    const title = prompt('Goal title:');
-    if (!title) return;
-
-    const description = prompt('Description (optional):');
+    const values = await goalDialog(null);
+    if (!values) return;
 
     ecosystemData.goals = ecosystemData.goals || [];
     ecosystemData.goals.push({
         id: generateId(),
-        title: title,
-        description: description || '',
-        status: 'open',
+        title: values.title,
+        description: values.description,
+        status: values.status,
         linked_runs: [],
         updated_at: new Date().toISOString()
     });
 
-    await saveEcosystem();
+    await saveEcosystem('Goal added');
 }
 
 async function renderEcosystemSchedules() {
@@ -275,21 +292,26 @@ async function renderEcosystemSchedules() {
 }
 
 async function runScheduleNow(schedId) {
-    if (!confirm('Run this schedule now?')) return;
+    const confirmed = await window.Conduction.confirmDialog({
+        title: 'Run schedule now',
+        message: 'This launches a real factory run immediately, outside its normal cadence.',
+        confirmLabel: 'Run now'
+    });
+    if (!confirmed) return;
 
     try {
         const result = await fetchJson(`/api/schedules/${encodeURIComponent(schedId)}/run-now`, {
             method: 'POST'
         });
-        alert(`Launched factory run: ${result.factory_run_id}`);
+        toast(`Launched factory run ${result.factory_run_id}`, 'ok');
         renderEcosystemSchedules();
     } catch (error) {
-        alert(`Error: ${error.message}`);
+        toast(`Could not run the schedule: ${error.message}`, 'error');
     }
 }
 
 async function addEcosystemSchedule() {
-    alert('Schedule creation UI coming soon - edit ecosystem.json directly for now');
+    toast('No schedule editor yet — add it to ecosystem.json, then reload.', 'warn');
 }
 
 async function loadSDKs() {
@@ -339,7 +361,7 @@ async function loadSchedulerState() {
     }
 }
 
-async function saveEcosystem() {
+async function saveEcosystem(successMessage) {
     try {
         await fetchJson('/api/ecosystem', {
             method: 'PUT',
@@ -347,8 +369,10 @@ async function saveEcosystem() {
             body: JSON.stringify(ecosystemData)
         });
         await loadEcosystem();
+        if (successMessage) toast(successMessage, 'ok');
     } catch (error) {
-        alert(`Error saving: ${error.message}`);
+        // Sticky: a failed save the user scrolled past is a lost edit.
+        toast(`Could not save: ${error.message}`, 'error');
     }
 }
 
@@ -388,7 +412,7 @@ window.runScheduleNow = runScheduleNow;
 
 // Dry-run toggle (display only - actual setting is via env var)
 document.getElementById('dry-run-toggle').addEventListener('change', (e) => {
-    alert('Dry-run mode is controlled by the CONDUCTION_DRY_RUN environment variable. Restart the server with CONDUCTION_DRY_RUN=1 to enable.');
+    toast('Dry-run is set at boot: restart the server with CONDUCTION_DRY_RUN=1.', 'info');
     e.target.checked = false; // Reset since we can't actually change it from UI
 });
 

@@ -72,18 +72,14 @@ def test_mirroring_twice_does_not_duplicate_claim_rows(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(str(mirror.db_path))
     try:
-        rows = conn.execute(
-            "SELECT run_id, path, owner, status, seq FROM claims"
-        ).fetchall()
+        rows = conn.execute("SELECT run_id, path, owner, status, seq FROM claims").fetchall()
     finally:
         conn.close()
         mirror.close()
 
     # Two distinct claim.granted events (seq 3 and 4) were logged once each;
     # mirroring the same file twice must not double them to four.
-    assert len(rows) == len(set(rows)) == 2, (
-        f"expected exactly 2 distinct claim rows, got {rows!r}"
-    )
+    assert len(rows) == len(set(rows)) == 2, f"expected exactly 2 distinct claim rows, got {rows!r}"
 
 
 def test_mission_completed_updates_run_status(tmp_path: Path) -> None:
@@ -95,9 +91,7 @@ def test_mission_completed_updates_run_status(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(str(mirror.db_path))
     try:
-        status = conn.execute(
-            "SELECT status FROM runs WHERE run_id = ?", ("R",)
-        ).fetchone()[0]
+        status = conn.execute("SELECT status FROM runs WHERE run_id = ?", ("R",)).fetchone()[0]
     finally:
         conn.close()
         mirror.close()
@@ -133,6 +127,5 @@ def test_mirroring_a_third_time_ingests_only_the_newly_appended_event(
         mirror.close()
 
     assert after - before == 1, (
-        f"expected exactly one new event row after the append, got a delta of "
-        f"{after - before}"
+        f"expected exactly one new event row after the append, got a delta of {after - before}"
     )

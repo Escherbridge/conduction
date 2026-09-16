@@ -7,8 +7,8 @@ import pytest
 from agentgraph import ScriptedWorker
 from agentgraph.dispatcher import AgentRequest, AgentResponse
 from agentgraph.sdk_workers import (
-    RoutingWorker,
     WORKER_REGISTRY,
+    RoutingWorker,
     available_sdks,
     make_worker,
     resolve_workers,
@@ -142,9 +142,9 @@ def test_available_sdks_does_not_import_claude_sdk_eagerly() -> None:
     _ = available_sdks()
 
     # SDK should still not be in sys.modules
-    assert (
-        "claude_agent_sdk" not in sys.modules
-    ), "available_sdks() eagerly imported claude_agent_sdk"
+    assert "claude_agent_sdk" not in sys.modules, (
+        "available_sdks() eagerly imported claude_agent_sdk"
+    )
 
 
 def test_make_worker_supports_claude() -> None:

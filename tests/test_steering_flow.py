@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import pytest
 import requests
 
 
@@ -101,7 +100,9 @@ def test_launch_and_complete(app_server_factory):
         # Last event should be mission.completed with status=completed
         last_event = events[-1]
         assert last_event["type"] == "mission.completed", f"Last event type: {last_event['type']}"
-        assert last_event["payload"]["status"] == "completed", f"Mission status: {last_event['payload']}"
+        assert last_event["payload"]["status"] == "completed", (
+            f"Mission status: {last_event['payload']}"
+        )
 
         server.stop()
 
@@ -139,7 +140,9 @@ def test_interrupt_mid_run(app_server_factory):
 
         # Wait for mission to finish
         final_status = poll_until_terminal(base_url, run_id, timeout_seconds=30)
-        assert final_status in ("completed", "failed", "stale"), f"Unexpected status: {final_status}"
+        assert final_status in ("completed", "failed", "stale"), (
+            f"Unexpected status: {final_status}"
+        )
 
         # Verify interrupt.signal exists
         run_dir = target_repo / ".agentgraph" / "runs" / "dryrun-b"
@@ -149,8 +152,12 @@ def test_interrupt_mid_run(app_server_factory):
         # Count agent.responded events - should be fewer than 4
         log_path = run_dir / "run.jsonl"
         events = read_jsonl(log_path)
-        agent_responded = [e for e in events if e["type"] == "agent.responded"
-                          and e["payload"].get("worker") in ["agent1", "agent2", "agent3", "agent4"]]
+        agent_responded = [
+            e
+            for e in events
+            if e["type"] == "agent.responded"
+            and e["payload"].get("worker") in ["agent1", "agent2", "agent3", "agent4"]
+        ]
         assert len(agent_responded) < 4, f"Expected <4 agent responses, got {len(agent_responded)}"
 
         server.stop()
@@ -191,9 +198,7 @@ def test_resume_with_cache(app_server_factory):
         # Resume with edited brief for one agent
         resume_payload = {
             "original_agents": payload["agents"],
-            "agent_edits": [
-                {"name": "agent1", "brief": "Task 1 (revised)"}
-            ],
+            "agent_edits": [{"name": "agent1", "brief": "Task 1 (revised)"}],
             "max_turns": 20,
             "max_concurrency": 1,  # serial dispatch so an interrupt can stop later agents
         }
@@ -214,20 +219,30 @@ def test_resume_with_cache(app_server_factory):
         resume_log = resume_dir / "run.jsonl"
         events = read_jsonl(resume_log)
 
-        agent_responded = [e for e in events if e["type"] == "agent.responded"
-                          and e["payload"].get("worker") in ["agent1", "agent2", "agent3", "agent4"]]
+        agent_responded = [
+            e
+            for e in events
+            if e["type"] == "agent.responded"
+            and e["payload"].get("worker") in ["agent1", "agent2", "agent3", "agent4"]
+        ]
         assert len(agent_responded) == 4, f"Expected 4 agent responses, got {len(agent_responded)}"
 
         # Cache hits never reach the worker, so the dry-run invocation file is the
         # honest record of who actually executed in the resumed run.
         original_dir = target_repo / ".agentgraph" / "runs" / "dryrun-resume"
         original_invocations = (original_dir / "dry-run-invocations.txt").read_text().split()
-        assert 2 <= len(original_invocations) < 4, f"Interrupt should leave 2-3 executed agents, got {original_invocations}"
+        assert 2 <= len(original_invocations) < 4, (
+            f"Interrupt should leave 2-3 executed agents, got {original_invocations}"
+        )
 
         resumed_invocations = (resume_dir / "dry-run-invocations.txt").read_text().split()
         assert "agent1" in resumed_invocations, "Edited agent must re-run"
-        assert "agent2" not in resumed_invocations, "Unchanged, already-finished agent must be served from cache"
-        assert len(resumed_invocations) < 4, f"Expected cache hits to skip agents, got {resumed_invocations}"
+        assert "agent2" not in resumed_invocations, (
+            "Unchanged, already-finished agent must be served from cache"
+        )
+        assert len(resumed_invocations) < 4, (
+            f"Expected cache hits to skip agents, got {resumed_invocations}"
+        )
 
         server.stop()
 

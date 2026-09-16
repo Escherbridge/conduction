@@ -33,9 +33,7 @@ def target_repo():
     """A throwaway repo under Path.home(), which is the default allowed root."""
     # ignore_cleanup_errors: on Windows the mission thread may still hold
     # run.jsonl open when the fixture unwinds; a leftover temp dir is not a failure.
-    with tempfile.TemporaryDirectory(
-        dir=str(Path.home()), ignore_cleanup_errors=True
-    ) as directory:
+    with tempfile.TemporaryDirectory(dir=str(Path.home()), ignore_cleanup_errors=True) as directory:
         yield str(Path(directory).resolve())
 
 
@@ -99,8 +97,17 @@ def test_agents_shows_a_freshly_launched_run_as_running(server, target_repo):
         assert agent["slug"] == slug
         assert agent["target_repo"] == target_repo
         assert set(agent) == {
-            "run_id", "slug", "target_repo", "agent", "model", "status",
-            "turns", "cost_usd", "last_finding", "last_event_type", "last_event_ts",
+            "run_id",
+            "slug",
+            "target_repo",
+            "agent",
+            "model",
+            "status",
+            "turns",
+            "cost_usd",
+            "last_finding",
+            "last_event_type",
+            "last_event_ts",
         }
 
 
@@ -110,9 +117,7 @@ def test_timeline_rows_have_the_contract_shape(server, target_repo):
     rows = []
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline and not rows:
-        rows = requests.get(
-            f"{server.base_url}/api/observe/timeline?limit=200", timeout=30
-        ).json()
+        rows = requests.get(f"{server.base_url}/api/observe/timeline?limit=200", timeout=30).json()
         if not rows:
             time.sleep(0.5)
 

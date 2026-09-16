@@ -253,7 +253,7 @@
         } catch (err) {
             button.disabled = false;
             button.textContent = "Run now";
-            alert("Run now failed: " + err.message);
+            window.Conduction.toast("Run now failed: " + err.message, "error");
         }
     });
 

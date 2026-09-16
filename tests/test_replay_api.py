@@ -168,8 +168,7 @@ def test_delete_refuses_a_running_mission(server, target_repo):
         "slug": slug,
         "target_repo": target_repo,
         "agents": [
-            {"name": f"agent{index}", "brief": "wait", "tools": ["Read"]}
-            for index in range(4)
+            {"name": f"agent{index}", "brief": "wait", "tools": ["Read"]} for index in range(4)
         ],
         "max_turns": 3,
         "max_concurrency": 1,

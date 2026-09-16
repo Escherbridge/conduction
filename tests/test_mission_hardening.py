@@ -37,21 +37,19 @@ def test_owns_lands_in_request_meta_without_changing_identity(tmp_path: Path) ->
     with_owns = Mission(
         "owns-with", [AgentSpec("alpha", "look at area A", owns=("src/",))], max_turns=5
     )
-    without_owns = Mission(
-        "owns-without", [AgentSpec("alpha", "look at area A")], max_turns=5
-    )
+    without_owns = Mission("owns-without", [AgentSpec("alpha", "look at area A")], max_turns=5)
 
     result_with = with_owns.run(tmp_path / "with.jsonl", worker=ScriptedWorker(responder))
-    result_without = without_owns.run(
-        tmp_path / "without.jsonl", worker=ScriptedWorker(responder)
-    )
+    result_without = without_owns.run(tmp_path / "without.jsonl", worker=ScriptedWorker(responder))
 
     requested_with = next(
-        e for e in result_with.graph.events
+        e
+        for e in result_with.graph.events
         if e.type == "agent.requested" and e.payload.get("worker") == "alpha"
     )
     requested_without = next(
-        e for e in result_without.graph.events
+        e
+        for e in result_without.graph.events
         if e.type == "agent.requested" and e.payload.get("worker") == "alpha"
     )
 
@@ -78,8 +76,7 @@ def test_agent_failure_marks_result_failed_and_report_not_ok(tmp_path: Path) -> 
     assert result.failed is True
 
     alpha_report = next(
-        o.data for o in result.graph.objects(type="agent_report")
-        if o.data["worker"] == "alpha"
+        o.data for o in result.graph.objects(type="agent_report") if o.data["worker"] == "alpha"
     )
     assert alpha_report["ok"] is False
 
@@ -133,7 +130,7 @@ def test_gate_is_not_invoked_during_replay(tmp_path: Path) -> None:
     mission.run(tmp_path / "a.jsonl", worker=ScriptedWorker(lambda r, a: f"{r.worker} ok"))
     assert calls["n"] == 1, "gate should have run exactly once on the live pass"
 
-    replayed = mission.replay(tmp_path / "a.jsonl", tmp_path / "b.jsonl")
+    mission.replay(tmp_path / "a.jsonl", tmp_path / "b.jsonl")
 
     assert (tmp_path / "b.jsonl").read_bytes() == (tmp_path / "a.jsonl").read_bytes()
     assert calls["n"] == 1, "replay re-invoked the gate instead of replaying its finding"
@@ -152,9 +149,7 @@ def test_stop_when_stops_the_run_before_every_agent_responds(tmp_path: Path) -> 
     )
 
     assert result.host.stopped_reason, "stop_when should set a stopped_reason"
-    responded = {
-        e.payload["worker"] for e in result.graph.events if e.type == "agent.responded"
-    }
+    responded = {e.payload["worker"] for e in result.graph.events if e.type == "agent.responded"}
     assert responded != {"alpha", "beta"}, "stop_when did not actually stop the run early"
 
 

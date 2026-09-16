@@ -20,7 +20,8 @@
                         <div class="form-group">
                             <label for="target_repo">Target Repository</label>
                             <input type="text" id="target_repo" name="target_repo" required
-                                   placeholder="/path/to/repo" class="form-input">
+                                   placeholder="/path/to/repo" class="form-input mono"
+                                   data-folder-input data-folder-title="Select target repository">
                         </div>
 
                         <div class="form-group">
@@ -116,11 +117,13 @@
             // Fetch available SDKs
             await fetchSdks();
 
-            // Add initial agent row
-            addAgentRow();
+            // `?from=<run_id>` prefills the whole form from that run's manifest
+            // (the "Re-run" button on a run page). Falls back to one blank row.
+            const prefilled = await prefillFromRun();
+            if (!prefilled) addAgentRow();
 
             // Set up event listeners
-            document.getElementById('add-agent-btn').addEventListener('click', addAgentRow);
+            document.getElementById('add-agent-btn').addEventListener('click', () => addAgentRow());
             document.getElementById('load-example-btn').addEventListener('click', loadExample);
             document.getElementById('launch-form').addEventListener('submit', handleSubmit);
         });
@@ -208,13 +211,89 @@
             });
         }
 
-        function loadExample() {
+        /* Prefill from ?from=<run_id>. Returns true when the form was filled, so
+           the caller knows not to add the default blank agent row. */
+        async function prefillFromRun() {
+            const sourceRunId = new URLSearchParams(window.location.search).get('from');
+            if (!sourceRunId) return false;
+
+            let spec;
+            try {
+                spec = await fetchJson(`/api/runs/${encodeId(sourceRunId)}/relaunch`);
+            } catch (error) {
+                showBanner(`Could not load ${sourceRunId}: ${error.message}`, 'warn');
+                return false;
+            }
+
+            document.getElementById('target_repo').value = spec.target_repo || '';
+            document.getElementById('slug').value = spec.slug || '';
+            document.getElementById('synthesis').value = spec.synthesis || '';
+            if (spec.max_turns) document.getElementById('max_turns').value = spec.max_turns;
+            if (spec.max_concurrency) document.getElementById('max_concurrency').value = spec.max_concurrency;
+
+            document.getElementById('agents-container').innerHTML = '';
+            agentCounter = 0;
+            (spec.agents || []).forEach(agent => addAgentRow(
+                agent.name || '',
+                agent.brief || '',
+                agent.tools && agent.tools.length ? agent.tools : ['Read', 'Grep', 'Glob'],
+                agent.sdk || 'claude',
+                (agent.owns || []).join(', ')
+            ));
+
+            const gate = spec.gate || {};
+            document.getElementById('gate-pytest').checked = Boolean(gate.pytest);
+            document.getElementById('gate-owns').checked = Boolean(gate.owns);
+            document.getElementById('gate-probe-routes').value =
+                (gate.probe && gate.probe.routes ? gate.probe.routes : []).join(', ');
+
+            const notes = [`Prefilled from ${spec.source_run_id}.`];
+            if (spec.slug !== spec.original_slug) {
+                notes.push(`Slug "${spec.original_slug}" is taken — using "${spec.slug}".`);
+            }
+            // The repo can have moved or been deleted since the original run.
+            // Say so now rather than letting submit fail with a 400.
+            if (spec.target_repo_exists === false) {
+                notes.push(`${spec.target_repo} no longer exists — pick the repo again.`);
+            }
+            showBanner(notes.join(' '), spec.target_repo_exists === false ? 'warn' : 'info');
+            // The picker's validity badge only refreshes on input events.
+            document.getElementById('target_repo').dispatchEvent(new Event('change', { bubbles: true }));
+            return (spec.agents || []).length > 0;
+        }
+
+        /** One-line notice above the form. Escapes its own text. */
+        function showBanner(message, kind) {
+            let banner = document.getElementById('launch-banner');
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.id = 'launch-banner';
+                const form = document.getElementById('launch-form');
+                form.parentNode.insertBefore(banner, form);
+            }
+            banner.className = `launch-banner launch-banner-${kind === 'warn' ? 'warn' : 'info'}`;
+            banner.textContent = message;
+        }
+
+        async function loadExample() {
             // Clear existing agents
             document.getElementById('agents-container').innerHTML = '';
             agentCounter = 0;
 
-            // Set mission config
-            document.getElementById('target_repo').value = '/path/to/project';
+            // Set mission config. The repo field keeps whatever is already there
+            // (usually a real path from the picker); a placeholder like
+            // "/path/to/project" only ever produces a 400 on submit.
+            const repoField = document.getElementById('target_repo');
+            if (!repoField.value.trim()) {
+                try {
+                    const info = await fetchJson('/api/fs/roots');
+                    const known = (info.roots || []).find(entry => entry.kind === 'known-repo');
+                    if (known) {
+                        repoField.value = known.path;
+                        repoField.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                } catch (error) { /* leave it blank; the picker is right there */ }
+            }
             document.getElementById('slug').value = 'example-mission';
             document.getElementById('synthesis').value = '';
             document.getElementById('max_turns').value = '35';
@@ -241,6 +320,20 @@
             document.getElementById('gate-pytest').checked = true;
             document.getElementById('gate-owns').checked = true;
             document.getElementById('gate-probe-routes').value = '';
+        }
+
+        const MAX_SLUG_LENGTH = 64;
+
+        /** "fix-auth" -> "fix-auth-2", "fix-auth-2" -> "fix-auth-3". Mirrors
+            next_free_slug() in app.py, including its 64-char trim, so the
+            suggestion offered here is one the server will actually accept.
+            Returns null when no valid bump exists. */
+        function bumpSlug(slug) {
+            const match = /^(.+?)-(\d+)$/.exec(slug);
+            const stem = match ? match[1] : slug;
+            const suffix = `-${match ? Number(match[2]) + 1 : 2}`;
+            const bumped = stem.slice(0, MAX_SLUG_LENGTH - suffix.length) + suffix;
+            return /^[A-Za-z0-9._-]{1,64}$/.test(bumped) ? bumped : null;
         }
 
         async function handleSubmit(e) {
@@ -336,8 +429,23 @@
                         window.location.href = `/runs/${encodeId(data.run_id)}`;
                     }, 1000);
                 } catch (error) {
-                    // fetchJson throws with server error text
-                    errorDisplay.textContent = error.message || 'Launch failed';
+                    // A 409 means the slug is taken in this repo. Don't just say
+                    // so -- offer the next free one, which is the only thing the
+                    // user was going to do anyway.
+                    const bumped = error.status === 409 && /slug/i.test(error.message || '')
+                        ? bumpSlug(slug) : null;
+                    if (bumped) {
+                        errorDisplay.innerHTML = escapeHtml(error.message) +
+                            ' <button type="button" class="btn" id="use-suggested-slug">Use "' +
+                            escapeHtml(bumped) + '"</button>';
+                        errorDisplay.querySelector('#use-suggested-slug').addEventListener('click', () => {
+                            document.getElementById('slug').value = bumped;
+                            errorDisplay.style.display = 'none';
+                            statusSpan.textContent = '';
+                        });
+                    } else {
+                        errorDisplay.textContent = error.message || 'Launch failed';
+                    }
                     errorDisplay.style.display = 'block';
                     statusSpan.textContent = '✗ Failed';
                     statusSpan.style.color = 'var(--danger)';

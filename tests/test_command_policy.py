@@ -85,9 +85,7 @@ def test_dangerous_command_is_denied(tool_name: str, command: str) -> None:
 
 
 @pytest.mark.parametrize("tool_name,command", DANGEROUS)
-def test_dangerous_command_match_is_case_insensitive(
-    tool_name: str, command: str
-) -> None:
+def test_dangerous_command_match_is_case_insensitive(tool_name: str, command: str) -> None:
     violations: list = []
     hook = build_hook(on_command_violation=violations.append)
 

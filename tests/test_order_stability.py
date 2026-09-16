@@ -15,7 +15,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from activegraph import Event, FrozenClock, Graph, IDGen, Runtime, behavior
 
 from agentgraph import (
@@ -24,9 +23,9 @@ from agentgraph import (
     AgentCache,
     Host,
     JSONLLog,
+    ReplayPlan,
     ScriptedWorker,
     read_events,
-    ReplayPlan,
     request_agent,
 )
 from agentgraph.events import FINDING_RECORDED
@@ -81,9 +80,7 @@ def record(path: Path, *, delays: dict[str, float]) -> Graph:
     log = JSONLLog(path).attach(graph)
     rt = Runtime(graph, behaviors=wide_behaviors())
     host = Host(rt, ScriptedWorker(responder, delays=delays), max_concurrency=8)
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     asyncio.run(host.run())
     host.close()
     log.close()
@@ -107,9 +104,7 @@ def replay(recorded_path: Path, replay_path: Path):
         replay=True,
         plan=ReplayPlan.from_events(recorded),
     )
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     result = asyncio.run(host.run())
     host.close()
     log.close()
@@ -123,12 +118,8 @@ def test_eight_concurrent_agents_replay_byte_identically(tmp_path: Path) -> None
 
     graph = record(recorded_path, delays=DELAYS)
 
-    completion_order = [
-        e.payload["worker"] for e in graph.events if e.type == AGENT_RESPONDED
-    ]
-    dispatch_order = [
-        e.payload["worker"] for e in graph.events if e.type == AGENT_REQUESTED
-    ]
+    completion_order = [e.payload["worker"] for e in graph.events if e.type == AGENT_RESPONDED]
+    dispatch_order = [e.payload["worker"] for e in graph.events if e.type == AGENT_REQUESTED]
     assert dispatch_order == WORKERS
     assert completion_order != dispatch_order, (
         "the delays did not actually reorder completions, so this test proved "
@@ -180,15 +171,11 @@ def test_completion_order_survives_a_different_race(tmp_path: Path) -> None:
     record(recorded_path, delays=DELAYS)
     recorded = read_events(recorded_path)
 
-    recorded_workers = [
-        e.payload["worker"] for e in recorded if e.type == AGENT_RESPONDED
-    ]
+    recorded_workers = [e.payload["worker"] for e in recorded if e.type == AGENT_RESPONDED]
     assert recorded_workers != WORKERS, "recording did not reorder"
 
     graph, _ = replay(recorded_path, tmp_path / "replayed.jsonl")
-    replayed_workers = [
-        e.payload["worker"] for e in graph.events if e.type == AGENT_RESPONDED
-    ]
+    replayed_workers = [e.payload["worker"] for e in graph.events if e.type == AGENT_RESPONDED]
     assert replayed_workers == recorded_workers
 
 
@@ -216,9 +203,7 @@ def test_replay_rejects_a_log_whose_calls_do_not_correspond(tmp_path: Path) -> N
         replay=True,
         plan=truncated,
     )
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     with pytest.raises(ReplayOrderStall):
         asyncio.run(host.run())
     host.close()
@@ -250,9 +235,7 @@ def test_concurrency_limit_is_respected(tmp_path: Path) -> None:
     graph = fresh_graph()
     rt = Runtime(graph, behaviors=wide_behaviors())
     host = Host(rt, Counting(lambda r, a: "ok"), max_concurrency=3)
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     asyncio.run(host.run())
     host.close()
 
@@ -318,9 +301,7 @@ def _chatty_run(path: Path, *, delays, findings_per_worker=4, recorded=None):
             "replay": True,
         }
     host = Host(rt, worker, max_concurrency=8, **kwargs)
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     result = asyncio.run(host.run())
     host.close()
     log.close()
@@ -402,22 +383,16 @@ def test_an_interrupted_run_resumes_without_repeating_paid_work(
     log = JSONLLog(log_path).attach(graph)
     rt = Runtime(graph, behaviors=wide_behaviors())
     host = Host(rt, ScriptedWorker(responder, delays=DELAYS), max_concurrency=8)
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     # Interrupt: stop as soon as three agents have landed.
     interrupted = asyncio.run(
-        host.run(
-            until=lambda g: sum(1 for e in g.events if e.type == AGENT_RESPONDED) >= 3
-        )
+        host.run(until=lambda g: sum(1 for e in g.events if e.type == AGENT_RESPONDED) >= 3)
     )
     host.close()
     log.close()
 
     assert interrupted.stopped_reason == "until"
-    finished_first = [
-        e.payload["worker"] for e in graph.events if e.type == AGENT_RESPONDED
-    ]
+    finished_first = [e.payload["worker"] for e in graph.events if e.type == AGENT_RESPONDED]
     # At least the three that tripped `until`, plus any that had already
     # landed: finalization records everything paid for, never fewer.
     assert 3 <= len(finished_first) < len(WORKERS), finished_first
@@ -439,9 +414,7 @@ def test_an_interrupted_run_resumes_without_repeating_paid_work(
         plan=ReplayPlan.from_events(recorded),
         resume=True,
     )
-    graph2.emit(
-        Event(id=graph2.ids.event(), type=SEED, payload={}, timestamp=graph2.clock.now())
-    )
+    graph2.emit(Event(id=graph2.ids.event(), type=SEED, payload={}, timestamp=graph2.clock.now()))
     result = asyncio.run(host2.run())
     host2.close()
     log2.close()
@@ -465,23 +438,15 @@ def test_an_interrupted_run_resumes_without_repeating_paid_work(
     # lost: every response in the interrupted log reappears, attributed to the
     # same worker, carrying the same output.
     recorded_responses = {
-        e.payload["worker"]: e.payload["output"]
-        for e in recorded
-        if e.type == AGENT_RESPONDED
+        e.payload["worker"]: e.payload["output"] for e in recorded if e.type == AGENT_RESPONDED
     }
     resumed_responses = {
-        e.payload["worker"]: e.payload["output"]
-        for e in graph2.events
-        if e.type == AGENT_RESPONDED
+        e.payload["worker"]: e.payload["output"] for e in graph2.events if e.type == AGENT_RESPONDED
     }
     for worker, output in recorded_responses.items():
-        assert resumed_responses[worker] == output, (
-            f"{worker}'s recorded answer changed on resume"
-        )
+        assert resumed_responses[worker] == output, f"{worker}'s recorded answer changed on resume"
 
     # The finished graph is complete: every worker reported exactly once.
-    responded = [
-        e.payload["worker"] for e in graph2.events if e.type == AGENT_RESPONDED
-    ]
+    responded = [e.payload["worker"] for e in graph2.events if e.type == AGENT_RESPONDED]
     assert sorted(responded) == sorted(WORKERS)
     assert len(first_pass_calls) >= 3

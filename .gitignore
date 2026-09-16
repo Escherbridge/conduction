@@ -6,3 +6,8 @@ node_modules/
 .venv/
 *.pid
 *.log
+
+# Conductor bundle: local development context (product, styleguides, tracks,
+# runbook). Deliberately untracked -- it is this machine's working context, not
+# a repo artifact. Remove this line to share it with the team.
+conductor/

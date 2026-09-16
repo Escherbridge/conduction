@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agentgraph import policy
@@ -19,7 +19,7 @@ SCHEDULER_TICK_SECONDS = 60
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(moment: datetime | None) -> str | None:
@@ -80,10 +80,16 @@ def record_schedule_run(
     stamp = iso(utcnow())
     if source == "ecosystem":
         doc = policy.load_ecosystem(app_root)
-        save = lambda data: policy.save_ecosystem(app_root, data)
+
+        def save(data):
+            policy.save_ecosystem(app_root, data)
+
     else:
         doc = policy.load_project(target_repo)
-        save = lambda data: policy.save_project(target_repo, data)
+
+        def save(data):
+            policy.save_project(target_repo, data)
+
     changed = False
     for schedule in doc.get("schedules", []) or []:
         if schedule.get("id") == schedule_id:
@@ -132,7 +138,7 @@ def launch_schedule_blocking(app, item: dict) -> tuple[dict | None, str | None, 
 
     remember_repo(target_repo)
     rules = effective_policy_rules(target_repo)
-    factory_run_id = "%s-%d" % (spec.slug, int(time.time()))
+    factory_run_id = f"{spec.slug}-{int(time.time())}"
     start_factory_thread(app, spec, target_repo, factory_run_id, 0, rules=rules)
     record_schedule_run(
         ECOSYSTEM_ROOT,
@@ -178,7 +184,7 @@ async def scheduler_tick(app) -> list[str]:
             if payload:
                 launched.append(payload["factory_run_id"])
     except Exception as error:  # a scheduler crash must never take the app down
-        print("Scheduler tick failed: %s" % error)
+        print(f"Scheduler tick failed: {error}")
     app.ctx.scheduler_state = {"last_tick": iso(utcnow()), "launched": launched}
     return launched
 

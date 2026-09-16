@@ -14,7 +14,16 @@
             } catch (e) { /* private mode */ }
         })();
     </script>
-    <script src="/static/js/app.js" defer></script>
+    <!-- NOT deferred, deliberately. Every page's scripts block is an inline
+         script in the body, and inline scripts run during parsing - i.e. BEFORE
+         any deferred script. With `defer` here, each page that opens with
+         `const { fetchJson } = window.Conduction` threw on an undefined,
+         killing that page's whole script: tables stuck on "Loading...", forms
+         with no submit handler. These three files touch the DOM only from their
+         own DOMContentLoaded handlers, so loading them eagerly is safe. -->
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/dialogs.js"></script>
+    <script src="/static/js/folder-picker.js"></script>
 </head>
 <body>
 <div class="app-shell">

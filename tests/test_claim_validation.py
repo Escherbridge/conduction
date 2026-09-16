@@ -66,7 +66,7 @@ def test_msys_style_path_is_rejected_with_a_windows_drive_hint(tmp_path: Path) -
     # MSYS/Git-Bash rewrites `C:/Users/...` as `/c/Users/...`; a worker that
     # copy-pastes one of these into graph_claim must be told to use the
     # Windows form, not have it silently resolved to nonsense.
-    msys_path = "/c/Users/atooz/Programming/conduction/agentgraph/host.py"
+    msys_path = "/c/Users/dev/projects/conduction/agentgraph/host.py"
     result = host.worker_claim("w", [msys_path], event)
 
     assert result["granted"] is False

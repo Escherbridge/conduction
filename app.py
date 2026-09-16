@@ -1,27 +1,35 @@
-import os
-import sys
 import asyncio
 import hashlib
 import json as stdlib_json
+import os
 import re
 import shutil
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote
-from jinja2 import Environment, FileSystemLoader
-from sanic import Sanic
-from sanic.response import html, json as sanic_json, raw as _raw, text as raw_text, empty as empty_response
+
 from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.sanic import datastar_response
-from agentgraph.sqlite_sink import SqliteMirror
-from agentgraph import Mission, AgentSpec
-from agentgraph.mission import EDIT_TOOLS, READ_TOOLS
+from jinja2 import Environment, FileSystemLoader
+from sanic import Sanic
+from sanic.response import empty as empty_response
+from sanic.response import html
+from sanic.response import json as sanic_json
+from sanic.response import text as raw_text
+
+import webhooks
+from agentgraph import AgentSpec, Mission, policy
 from agentgraph.dispatcher import ScriptedWorker
+from agentgraph.factory import (
+    FactoryRunner,
+    load_factory_spec,
+    validate_factory_spec,
+)
 from agentgraph.gates import gate_from_spec, validate_gate_spec
-from agentgraph.sdk_workers import resolve_workers, available_sdks
 from agentgraph.manifest import (
     ensure_agentgraph_gitignore,
     manifest_from_request,
@@ -29,19 +37,22 @@ from agentgraph.manifest import (
     read_mission_manifest,
     write_mission_manifest,
 )
+from agentgraph.mission import READ_TOOLS
 from agentgraph.narrate import narrate_path
-from agentgraph import policy
-from agentgraph.factory import (
-    FactoryRunner,
-    load_factory_spec,
-    validate_factory_spec,
-)
+from agentgraph.sdk_workers import available_sdks, resolve_workers
+from agentgraph.sqlite_sink import SqliteMirror
 
 APP_ROOT = Path(__file__).resolve().parent
 # Where ecosystem.json lives; tests point this at a temp dir so they never
 # write rules into the real one.
 ECOSYSTEM_ROOT = Path(os.environ.get("CONDUCTION_ECOSYSTEM_ROOT") or APP_ROOT).resolve()
-KNOWN_REPOS_PATH = APP_ROOT / ".agentgraph" / "known_repos.json"
+# Where the repo registry lives. Overridable so the test suite never writes into
+# the developer's real registry: every launched mission registers its target
+# permanently, and repos_to_scan() does an rglob per entry on every /api/runs.
+# Left unset, a suite run adds dozens of temp repos and makes the app slower for
+# good -- 70 entries measured at 5.3 s per call.
+STATE_ROOT = Path(os.environ.get("CONDUCTION_STATE_ROOT") or APP_ROOT).resolve()
+KNOWN_REPOS_PATH = STATE_ROOT / ".agentgraph" / "known_repos.json"
 MIRROR_DB_PATH = APP_ROOT / ".agentgraph" / "missions.db"
 
 SLUG_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -98,6 +109,33 @@ def read_known_repos() -> list[str]:
     if not isinstance(entries, list):
         return []
     return [entry for entry in entries if isinstance(entry, str)]
+
+
+def prune_known_repos() -> int:
+    """Drop registrations whose directory is gone. Returns how many were dropped.
+
+    Registration is permanent by design, so every temp-dir test run leaves an
+    entry behind forever. That costs twice: repos_to_scan() does an rglob per
+    entry on every /api/runs call, and the folder picker offers each one as a
+    starting point -- a list of dead tmp paths is the first thing the user sees.
+
+    Called once at boot, never on the request path.
+    """
+    entries = read_known_repos()
+    live = []
+    for entry in entries:
+        try:
+            if Path(entry).is_dir():
+                live.append(entry)
+        except OSError:
+            continue
+    if len(live) == len(entries):
+        return 0
+    try:
+        KNOWN_REPOS_PATH.write_text(stdlib_json.dumps(live, indent=2), encoding="utf-8")
+    except OSError:
+        return 0
+    return len(entries) - len(live)
 
 
 def remember_repo(target_repo: Path) -> None:
@@ -221,7 +259,12 @@ def effective_status(app, run_id: str, recorded_status: str | None) -> str | Non
         return recorded_status
     ref = find_run(app, run_id)
     if ref is None or not ref.log_path.exists():
-        return recorded_status
+        # The mirror says "running" but the log is gone -- the repo was deleted
+        # or unregistered, or the launching process died without recording
+        # mission.completed. Whatever happened, it is not running now. Reporting
+        # the recorded status here is what made deleted temp-repo runs sit in
+        # the fleet counter as phantom live agents forever.
+        return "stale"
     if time.time() - ref.log_path.stat().st_mtime > STALE_RUN_SECONDS:
         return "stale"
     return recorded_status
@@ -289,7 +332,7 @@ def effective_policy_rules(target_repo: Path) -> list[dict]:
         project = policy.load_project(target_repo)
         return list(policy.effective_rules(ecosystem, project))
     except Exception as error:  # config problems must not block a launch
-        print("Could not resolve rules for %s: %s" % (target_repo, error))
+        print(f"Could not resolve rules for {target_repo}: {error}")
         return []
 
 
@@ -312,16 +355,31 @@ def rules_facts(rules: list[dict]) -> list[tuple]:
 # Imported after the helpers above exist: blueprint handlers `from app import`
 # them lazily at request time, never at module import.
 from routes.config import bp as config_bp  # noqa: E402
+from routes.fsapi import bp as fsapi_bp  # noqa: E402
 from routes.scheduler import start_scheduler  # noqa: E402
 
 app.blueprint(config_bp)
+app.blueprint(fsapi_bp)
+
+# Scope enforcement wraps every route, so it is installed after the blueprints.
+import access  # noqa: E402
+
+access.install(app)
 
 try:  # observe.py is a sibling wave-L deliverable; the app boots without it
     from routes.observe import bp as observe_bp  # noqa: E402
 
     app.blueprint(observe_bp)
 except ImportError as error:  # pragma: no cover - only while observe.py lands
-    print("routes.observe unavailable: %s" % error)
+    print(f"routes.observe unavailable: {error}")
+
+
+@app.before_server_start
+async def prune_registrations(app):
+    """One sweep at boot so a dead repo never reaches a scan or the picker."""
+    dropped = await asyncio.to_thread(prune_known_repos)
+    if dropped:
+        print(f"pruned {dropped} registered repo(s) that no longer exist")
 
 
 @app.after_server_start
@@ -379,7 +437,7 @@ def render_template(name: str, **context) -> str:
 
 
 FALLBACK_PAGE = (
-    "<!DOCTYPE html><html data-theme=\"dark\"><head><title>%s</title></head>"
+    '<!DOCTYPE html><html data-theme="dark"><head><title>%s</title></head>'
     "<body><h1>%s</h1></body></html>"
 )
 
@@ -419,9 +477,7 @@ async def projects_page(request):
 async def project_detail_page(request, key: str):
     """One project: its rules, goals, schedules and runs."""
     return html(
-        render_page(
-            "project_detail.html", title="Project", active="projects", repo_key=key
-        )
+        render_page("project_detail.html", title="Project", active="projects", repo_key=key)
     )
 
 
@@ -603,8 +659,7 @@ async def get_run_findings(request, run_id: str):
         (run_id,),
     )
     findings = [
-        {"seq": row[0], "worker": row[1], "topic": row[2], "summary": row[3]}
-        for row in rows
+        {"seq": row[0], "worker": row[1], "topic": row[2], "summary": row[3]} for row in rows
     ]
     return sanic_json(findings)
 
@@ -619,6 +674,131 @@ async def get_run_manifest(request, run_id: str):
     if manifest is None:
         return sanic_json({"error": f"No manifest for run: {run_id}"}, status=404)
     return sanic_json(manifest)
+
+
+SLUG_SUFFIX_PATTERN = re.compile(r"^(?P<stem>.+?)-(?P<n>\d+)$")
+MAX_SLUG_LENGTH = 64
+MAX_SLUG_SERIES = 999
+
+
+def next_free_slug(target_repo: Path, slug: str) -> str | None:
+    """First slug in the `name`, `name-2`, `name-3`, ... series with no run
+    directory yet, or None when the series is exhausted.
+
+    None is the honest answer, not a fallback to `slug`: returning a slug that
+    is already taken would make the launch form prefill a value guaranteed to
+    409, while telling the user it found a free one.
+
+    A trailing number is only read as a series counter when the bare stem is
+    itself a run -- otherwise `sprint-2024` would re-run as `sprint-2025`
+    instead of `sprint-2024-2`.
+    """
+    runs_root = target_repo / ".agentgraph" / "runs"
+
+    def taken(candidate: str) -> bool:
+        return (runs_root / candidate / "run.jsonl").exists()
+
+    if not taken(slug):
+        return slug
+
+    match = SLUG_SUFFIX_PATTERN.match(slug)
+    if match and taken(match.group("stem")):
+        stem, start = match.group("stem"), int(match.group("n")) + 1
+    else:
+        stem, start = slug, 2
+
+    for counter in range(start, MAX_SLUG_SERIES + 1):
+        suffix = f"-{counter}"
+        # Trim the stem rather than give up: a long slug must still be re-runnable.
+        candidate = stem[: MAX_SLUG_LENGTH - len(suffix)] + suffix
+        if not SLUG_PATTERN.match(candidate):
+            return None
+        if not taken(candidate):
+            return candidate
+    return None
+
+
+async def build_relaunch_spec(request, run_id: str):
+    """The stored manifest reshaped into a launch body, or (None, error_response).
+
+    The agents, briefs, tools and `owns` paths all come from the manifest on
+    disk -- never from the caller. That is what makes re-run safe to expose to a
+    remote client when authoring a new mission is not. See AGENTS.md
+    "access scopes".
+    """
+    ref = await asyncio.to_thread(find_run, request.app, run_id)
+    if ref is None:
+        return None, sanic_json({"error": f"Run not found: {run_id}"}, status=404)
+    manifest = await asyncio.to_thread(read_mission_manifest, ref.run_dir)
+    if manifest is None:
+        return None, sanic_json(
+            {"error": f"Run {run_id} has no manifest, so it cannot be re-run"}, status=404
+        )
+
+    target_repo = Path(manifest.get("target_repo") or ref.target_repo)
+    original_slug = manifest.get("slug") or ""
+    suggested = await asyncio.to_thread(next_free_slug, target_repo, original_slug)
+    if suggested is None:
+        return None, sanic_json(
+            {
+                "error": f"Every slug in the '{original_slug}' series is taken "
+                f"(up to -{MAX_SLUG_SERIES}). Pick a new slug by hand."
+            },
+            status=409,
+        )
+    repo_exists = await asyncio.to_thread(target_repo.is_dir)
+    return {
+        "source_run_id": run_id,
+        "original_slug": original_slug,
+        "slug": suggested,
+        "target_repo": str(target_repo),
+        # False means the repo moved or was deleted since the original run; the
+        # form warns up front instead of letting submit 400.
+        "target_repo_exists": repo_exists,
+        "agents": manifest.get("agents") or [],
+        "synthesis": manifest.get("synthesis"),
+        "gate": manifest.get("gate"),
+        "max_turns": manifest.get("max_turns"),
+        "max_concurrency": manifest.get("max_concurrency"),
+    }, None
+
+
+@app.get("/api/runs/<run_id:runid>/relaunch")
+async def get_run_relaunch_spec(request, run_id: str):
+    """A launch body rebuilt from this run's manifest, with a fresh slug.
+
+    Powers "Re-run" on the run page: one click to a prefilled launch form
+    instead of retyping every agent brief.
+    """
+    spec, error = await build_relaunch_spec(request, run_id)
+    return error if error is not None else sanic_json(spec)
+
+
+@app.post("/api/runs/<run_id:runid>/rerun")
+async def rerun_run(request, run_id: str):
+    """Launch this run again from its stored manifest. Remote-safe.
+
+    Accepts no agent definitions, so the caller cannot smuggle in new briefs,
+    tools or `owns` paths -- the only remote-reachable way to start work.
+    """
+    spec, error = await build_relaunch_spec(request, run_id)
+    if error is not None:
+        return error
+    if not spec["target_repo_exists"]:
+        return sanic_json(
+            {"error": f"target_repo no longer exists: {spec['target_repo']}"}, status=409
+        )
+    body = {
+        "slug": spec["slug"],
+        "target_repo": spec["target_repo"],
+        "agents": spec["agents"],
+        "synthesis": spec["synthesis"],
+        "max_turns": spec["max_turns"] or 30,
+        "max_concurrency": spec["max_concurrency"] or 4,
+    }
+    if spec["gate"]:
+        body["gate"] = spec["gate"]
+    return await launch_from_body(request, body)
 
 
 @app.get("/api/runs/<run_id:runid>/story")
@@ -658,14 +838,18 @@ async def replay_run(request, run_id: str):
         replay_slug = f"{ref.slug[: 64 - len(suffix)]}{suffix}"
         replay_slug, slug_error = validate_slug(replay_slug)
         if slug_error:
-            return sanic_json({"error": f"generated replay slug rejected: {slug_error}"}, status=400)
+            return sanic_json(
+                {"error": f"generated replay slug rejected: {slug_error}"}, status=400
+            )
 
         replay_dir = (target_repo / ".agentgraph" / "runs" / replay_slug).resolve()
         if not replay_dir.is_relative_to(target_repo):
             return sanic_json({"error": "resolved run directory escapes target_repo"}, status=400)
         new_log_path = replay_dir / "run.jsonl"
         if new_log_path.exists():
-            return sanic_json({"error": f"A replay run already exists for '{replay_slug}'"}, status=409)
+            return sanic_json(
+                {"error": f"A replay run already exists for '{replay_slug}'"}, status=409
+            )
 
         await asyncio.to_thread(prepare_run_directory, replay_dir)
 
@@ -757,7 +941,7 @@ async def delete_run(request, run_id: str):
 @datastar_response
 async def ping(request):
     """grab sse for datastar"""
-    fragment = '<div>Hello! Welcome to the D A T A S T A R </div>'
+    fragment = "<div>Hello! Welcome to the D A T A S T A R </div>"
     yield SSE.patch_elements(fragment)
 
 
@@ -888,9 +1072,7 @@ def resolve_mission_worker(run_dir: Path, agents: list[AgentSpec]):
 
 def validate_agent_sdks(agent_data: list[dict]) -> str | None:
     """Reject unknown sdk names up front, dry-run or not."""
-    agent_sdks = {
-        spec.get("name"): spec["sdk"] for spec in agent_data if spec.get("sdk")
-    }
+    agent_sdks = {spec.get("name"): spec["sdk"] for spec in agent_data if spec.get("sdk")}
     if not agent_sdks:
         return None
     try:
@@ -917,10 +1099,74 @@ async def launch_page(request):
     return html(render_template("launch.html", active="launch"))
 
 
+def final_mission_status(log_path: Path) -> dict:
+    """The `mission.completed` payload from a finished run's log, or {}.
+
+    Log records wrap the event: {"event": {"type", "payload", ...}, "run_id", "seq"}.
+    Scans backwards because completion is the last thing written, and a long
+    run's log is not worth re-reading in full to find it.
+    """
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in reversed(lines):
+        if "mission.completed" not in line:
+            continue
+        try:
+            record = stdlib_json.loads(line)
+        except ValueError:
+            continue
+        event = record.get("event") if isinstance(record.get("event"), dict) else record
+        if event.get("type") == "mission.completed":
+            payload = event.get("payload")
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def notify_webhooks(app_root: Path, event: str, run: dict) -> None:
+    """Fire one webhook event. Swallows everything.
+
+    A webhook receiver being unreachable must never touch the mission that
+    triggered it -- see AGENTS.md "webhooks".
+    """
+    try:
+        webhooks.dispatch(app_root, event, run)
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"webhook dispatch failed for {event}: {error}")
+
+
+def notify_run_finished(app_root: Path, run: dict, log_path: Path) -> None:
+    """Translate a finished run's log into run.completed / run.failed, plus
+    gate.failed when the gate is specifically what went wrong."""
+    outcome = final_mission_status(log_path)
+    if outcome:
+        status = outcome.get("status") or "failed"
+    else:
+        # No completion recorded: the mission ended without saying how. That is
+        # a failure, but say WHY rather than reporting a bare "failed" that the
+        # log does not support.
+        status = "failed"
+        outcome = {"reason": "no completion recorded"}
+    carried = ("agents_total", "agents_failed", "gate_passed", "reason")
+    payload = dict(run, status=status, **{k: outcome[k] for k in carried if k in outcome})
+    notify_webhooks(app_root, "run.failed" if status == "failed" else "run.completed", payload)
+    if outcome.get("gate_passed") is False:
+        notify_webhooks(app_root, "gate.failed", payload)
+
+
 @app.post("/api/runs")
 async def launch_mission(request):
-    """
-    Launch a new mission run from UI-provided agent specs.
+    """Launch a mission from client-supplied agent specs. Local scope only."""
+    return await launch_from_body(request, request.json or {})
+
+
+async def launch_from_body(request, body: dict):
+    """Launch a mission from an already-assembled request body.
+
+    Shared by POST /api/runs (body from the client) and POST /api/runs/<id>/rerun
+    (body rebuilt server-side from a stored manifest). See AGENTS.md
+    "access scopes" for why re-run must not route through the public endpoint.
 
     Request body (JSON):
     {
@@ -936,7 +1182,6 @@ async def launch_mission(request):
     }
     """
     try:
-        body = request.json or {}
         slug, slug_error = validate_slug(body.get("slug"))
         if slug_error:
             return sanic_json({"error": slug_error}, status=400)
@@ -974,7 +1219,7 @@ async def launch_mission(request):
             return sanic_json(
                 {
                     "error": f"A run already exists for slug '{slug}' in this repo. "
-                             "Use /resume or a new slug.",
+                    "Use /resume or a new slug.",
                     "run_id": compose_run_id(slug, target_repo),
                 },
                 status=409,
@@ -1037,18 +1282,44 @@ async def launch_mission(request):
             "status": "running",
         }
 
+        webhook_run = {
+            "run_id": run_id,
+            "slug": slug,
+            "target_repo": str(target_repo),
+            "agents": [spec.name for spec in agents],
+        }
+
         def run_mission_thread():
+            failure = None
             try:
                 mission.run(str(log_path), worker=worker, stop_when=stop_event.is_set)
             except Exception as error:
+                failure = error
                 print(f"Mission {run_id} errored: {error}")
             finally:
+                # Release the concurrency slot BEFORE notifying. Delivery is up
+                # to 35 s per subscription, and a run left "running" while its
+                # webhooks time out holds a slot the whole time -- enough
+                # blackholed URLs and the app stops accepting missions at all.
                 entry["status"] = "finished"
+
+            def notify_after_finish():
+                if failure is not None:
+                    notify_webhooks(
+                        ECOSYSTEM_ROOT, "run.failed", dict(webhook_run, error=str(failure))
+                    )
+                else:
+                    notify_run_finished(ECOSYSTEM_ROOT, webhook_run, log_path)
+
+            threading.Thread(
+                target=notify_after_finish, name=f"webhooks-{run_id}", daemon=True
+            ).start()
 
         thread = threading.Thread(target=run_mission_thread, name=f"mission-{run_id}")
         entry["thread"] = thread
         request.app.ctx.mission_processes[run_id] = entry
         thread.start()
+        await asyncio.to_thread(notify_webhooks, ECOSYSTEM_ROOT, "run.launched", webhook_run)
 
         return sanic_json(
             {
@@ -1159,7 +1430,9 @@ async def resume_mission(request, run_id: str):
         resume_slug = f"{ref.slug[: 64 - len(resume_suffix)]}{resume_suffix}"
         resume_slug, slug_error = validate_slug(resume_slug)
         if slug_error:
-            return sanic_json({"error": f"generated resume slug rejected: {slug_error}"}, status=400)
+            return sanic_json(
+                {"error": f"generated resume slug rejected: {slug_error}"}, status=400
+            )
 
         resume_dir = (target_repo / ".agentgraph" / "runs" / resume_slug).resolve()
         new_log_path = resume_dir / "run.jsonl"
@@ -1277,7 +1550,11 @@ DEFAULT_FACTORY_PATH = ".agentgraph/factory.json"
 
 def factory_spec_path(target_repo: Path, factory_path: object) -> tuple[Path | None, str | None]:
     """Resolve the repo-relative factory.json path inside target_repo."""
-    raw = factory_path if isinstance(factory_path, str) and factory_path.strip() else DEFAULT_FACTORY_PATH
+    raw = (
+        factory_path
+        if isinstance(factory_path, str) and factory_path.strip()
+        else DEFAULT_FACTORY_PATH
+    )
     candidate = Path(raw)
     if candidate.is_absolute():
         return None, "factory_path must be relative to target_repo"
@@ -1290,11 +1567,11 @@ def factory_spec_path(target_repo: Path, factory_path: object) -> tuple[Path | N
 def load_spec_or_errors(spec_path: Path):
     """(spec, errors) -- never raises; every validation problem is listed."""
     if not spec_path.exists():
-        return None, ["factory spec not found: %s" % spec_path]
+        return None, [f"factory spec not found: {spec_path}"]
     try:
         data = stdlib_json.loads(spec_path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as error:
-        return None, ["factory spec is not readable JSON: %s" % error]
+        return None, [f"factory spec is not readable JSON: {error}"]
     if not isinstance(data, dict):
         return None, ["factory spec must be a JSON object"]
     errors = validate_factory_spec(data)
@@ -1372,11 +1649,11 @@ def start_factory_thread(
         try:
             runner.run(start_wave=start_wave)
         except Exception as error:
-            print("Factory %s errored: %s" % (factory_run_id, error))
+            print(f"Factory {factory_run_id} errored: {error}")
         finally:
             entry["status"] = "finished"
 
-    thread = threading.Thread(target=run_factory_thread, name="factory-%s" % factory_run_id)
+    thread = threading.Thread(target=run_factory_thread, name=f"factory-{factory_run_id}")
     entry["thread"] = thread
     app.ctx.factory_runs[factory_run_id] = entry
     thread.start()
@@ -1450,13 +1727,13 @@ async def launch_factory(request):
 
         if active_factory_count(request.app) >= MAX_CONCURRENT_MISSIONS:
             return sanic_json(
-                {"error": "Too many factory runs running (max %d)" % MAX_CONCURRENT_MISSIONS},
+                {"error": f"Too many factory runs running (max {MAX_CONCURRENT_MISSIONS})"},
                 status=409,
             )
 
         await asyncio.to_thread(remember_repo, target_repo)
 
-        factory_run_id = "%s-%d" % (spec.slug, int(time.time()))
+        factory_run_id = f"{spec.slug}-{int(time.time())}"
         state_path = target_repo / ".agentgraph" / "factory-runs" / factory_run_id / "state.json"
         start_factory_thread(
             request.app,
@@ -1503,7 +1780,7 @@ async def get_factory_run(request, factory_run_id: str):
     """The state.json for one factory run (the source of truth on disk)."""
     found = await asyncio.to_thread(find_factory_state, factory_run_id)
     if found is None:
-        return sanic_json({"error": "Factory run not found: %s" % factory_run_id}, status=404)
+        return sanic_json({"error": f"Factory run not found: {factory_run_id}"}, status=404)
     state_path, state = found
     state = dict(state)
     state["state_path"] = str(state_path)
@@ -1541,7 +1818,7 @@ async def resume_factory(request, factory_run_id: str):
 
         found = await asyncio.to_thread(find_factory_state, factory_run_id)
         if found is None:
-            return sanic_json({"error": "Factory run not found: %s" % factory_run_id}, status=404)
+            return sanic_json({"error": f"Factory run not found: {factory_run_id}"}, status=404)
         _, state = found
 
         target_repo, repo_error = validate_target_repo(state.get("target_repo"))
@@ -1674,7 +1951,8 @@ async def query_costs(request):
     agent_rows = await fetch_rows(
         request.app,
         """
-        SELECT a.name, SUM(a.cost_usd) as total_cost, SUM(a.turns) as total_turns, COUNT(*) as run_count
+        SELECT a.name, SUM(a.cost_usd) as total_cost,
+               SUM(a.turns) as total_turns, COUNT(*) as run_count
         FROM agents a
         GROUP BY a.name
         ORDER BY total_cost DESC
@@ -1727,7 +2005,7 @@ async def query_claim_conflicts(request):
 
 if __name__ == "__main__":
     app.run(
-        host="127.0.0.1",
+        host=os.environ.get("CONDUCTION_HOST", "127.0.0.1"),
         port=int(os.environ.get("CONDUCTION_PORT", "8000")),
         dev=False,
         single_process=True,

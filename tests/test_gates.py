@@ -15,7 +15,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-
 from activegraph import Event, FrozenClock, Graph, IDGen, Runtime, behavior
 
 from agentgraph import (
@@ -25,9 +24,9 @@ from agentgraph import (
     ClaimLedger,
     Host,
     JSONLLog,
+    ReplayPlan,
     ScriptedWorker,
     read_events,
-    ReplayPlan,
     request_agent,
 )
 from agentgraph.claims import ClaimViolation, make_claim_hook
@@ -127,9 +126,7 @@ def test_phase2_two_agents_coordinate_through_the_graph() -> None:
     graph = fresh_graph()
     rt = Runtime(graph, behaviors=two_worker_behaviors())
     host = Host(rt, worker, max_concurrency=4)
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
 
     result = asyncio.run(host.run())
     host.close()
@@ -159,9 +156,7 @@ def test_phase2_agent_failure_is_recorded_not_raised() -> None:
     graph = fresh_graph()
     rt = Runtime(graph, behaviors=two_worker_behaviors())
     host = Host(rt, ScriptedWorker(responder))
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
 
     result = asyncio.run(host.run())
     host.close()
@@ -201,9 +196,7 @@ def test_phase3_log_is_readable_while_the_run_is_still_going(tmp_path: Path) -> 
     log.attach(graph)
     rt = Runtime(graph, behaviors=two_worker_behaviors())
     host = Host(rt, ScriptedWorker(responder, delays={"scout-b": 0.02}))
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
 
     asyncio.run(host.run())
     host.close()
@@ -243,16 +236,12 @@ def test_phase4_a_worker_reads_another_workers_finding() -> None:
     graph = fresh_graph()
     rt = Runtime(graph, behaviors=two_worker_behaviors())
     host = Host(rt, ScriptedWorker(responder, delays={"scout-b": 0.05}))
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
 
     asyncio.run(host.run())
     host.close()
 
-    outputs = {
-        o.data["worker"]: o.data["output"] for o in graph.objects(type="report")
-    }
+    outputs = {o.data["worker"]: o.data["output"] for o in graph.objects(type="report")}
     assert outputs["scout-b"] == "b saw: sector A is impassable"
 
     findings = [e for e in graph.events if e.type == FINDING_RECORDED]
@@ -281,9 +270,7 @@ def test_phase5_conflicting_claim_is_refused(tmp_path: Path) -> None:
     rt = Runtime(graph, behaviors=two_worker_behaviors())
     # Serialize the two claims so the outcome is decided, not raced.
     host = Host(rt, ScriptedWorker(responder, delays={"scout-b": 0.05}))
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
 
     asyncio.run(host.run())
     host.close()
@@ -329,14 +316,16 @@ def test_phase5_pretooluse_hook_rejects_an_unclaimed_write(tmp_path: Path) -> No
 
     # The owner is allowed through, and a read is never gated at all.
     owner_hook = make_claim_hook("scout-a", ledger)
-    assert asyncio.run(
-        owner_hook(
-            {"tool_name": "Write", "tool_input": {"file_path": target}}, None, None
+    assert (
+        asyncio.run(
+            owner_hook({"tool_name": "Write", "tool_input": {"file_path": target}}, None, None)
         )
-    ) == {}
-    assert asyncio.run(
-        hook({"tool_name": "Read", "tool_input": {"file_path": target}}, None, None)
-    ) == {}
+        == {}
+    )
+    assert (
+        asyncio.run(hook({"tool_name": "Read", "tool_input": {"file_path": target}}, None, None))
+        == {}
+    )
 
 
 def test_phase5_claim_paths_compare_case_and_separator_insensitively(
@@ -359,9 +348,7 @@ def _record_run(path: Path, *, responder, delays) -> Graph:
     log = JSONLLog(path).attach(graph)
     rt = Runtime(graph, behaviors=two_worker_behaviors())
     host = Host(rt, ScriptedWorker(responder, delays=delays))
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     asyncio.run(host.run())
     host.close()
     log.close()
@@ -388,9 +375,7 @@ def _replay_run(recorded_path: Path, replay_path: Path):
         replay=True,
         plan=ReplayPlan.from_events(recorded),
     )
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     result = asyncio.run(host.run())
     host.close()
     log.close()
@@ -437,9 +422,7 @@ def test_phase6_replay_fails_loud_when_the_request_changed(tmp_path: Path) -> No
     from agentgraph.dispatcher import AgentRequest, ReplayCacheMiss
 
     recorded_path = tmp_path / "recorded.jsonl"
-    _record_run(
-        recorded_path, responder=lambda request, api: "ok", delays={}
-    )
+    _record_run(recorded_path, responder=lambda request, api: "ok", delays={})
     cache = AgentCache.from_events(read_events(recorded_path))
 
     original = AgentRequest(
@@ -490,21 +473,15 @@ def test_phase6_identical_prompts_stay_distinct_calls(tmp_path: Path) -> None:
     graph = fresh_graph()
     rt = Runtime(graph, behaviors=[fan_out_same])
     host = Host(rt, ScriptedWorker(responder))
-    graph.emit(
-        Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now())
-    )
+    graph.emit(Event(id=graph.ids.event(), type=SEED, payload={}, timestamp=graph.clock.now()))
     asyncio.run(host.run())
     host.close()
 
     # `worker` is not part of the identity, so both requests hash identically.
-    hashes = {
-        e.payload["args_hash"] for e in graph.events if e.type == AGENT_REQUESTED
-    }
+    hashes = {e.payload["args_hash"] for e in graph.events if e.type == AGENT_REQUESTED}
     assert len(hashes) == 1, "the two calls should be content-identical"
 
-    occurrences = sorted(
-        e.payload["occurrence"] for e in graph.events if e.type == AGENT_REQUESTED
-    )
+    occurrences = sorted(e.payload["occurrence"] for e in graph.events if e.type == AGENT_REQUESTED)
     assert occurrences == [0, 1], "occurrence indices did not disambiguate the calls"
     assert calls["n"] == 2, "one of the two identical calls was skipped"
 

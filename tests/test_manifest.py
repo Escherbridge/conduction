@@ -21,8 +21,7 @@ from agentgraph.manifest import (
 )
 
 AGENTS = [
-    {"name": "alpha", "brief": "look at area A", "tools": ["Read", "Grep"],
-     "owns": ["src/a.py"]},
+    {"name": "alpha", "brief": "look at area A", "tools": ["Read", "Grep"], "owns": ["src/a.py"]},
     {"name": "beta", "brief": "look at area B"},
 ]
 
@@ -63,8 +62,11 @@ def test_manifest_round_trips_through_the_run_dir(tmp_path: Path) -> None:
     # Defaults are materialized, not implied, so a reader never has to guess.
     assert manifest["schema"] == 1 and manifest["kind"] == "mission"
     assert manifest["agents"][1] == {
-        "name": "beta", "brief": "look at area B",
-        "tools": ["Read", "Grep", "Glob"], "sdk": "claude", "owns": [],
+        "name": "beta",
+        "brief": "look at area B",
+        "tools": ["Read", "Grep", "Glob"],
+        "sdk": "claude",
+        "owns": [],
     }
     assert manifest["created_at"].endswith("Z")
     assert not list(run_dir.glob("*.tmp"))
@@ -96,9 +98,15 @@ def test_rebuilt_specs_hash_to_the_same_request_identity(tmp_path: Path) -> None
 
     repo = str(tmp_path / "repo")
     original = Mission(
-        "demo", original_specs, synthesis="rank the issues.",
-        model="claude-sonnet-4-5-20250929", max_turns=7, cwd=repo, claim_root=repo,
-        max_concurrency=2, transcript_dir=str(tmp_path / "a" / "transcripts"),
+        "demo",
+        original_specs,
+        synthesis="rank the issues.",
+        model="claude-sonnet-4-5-20250929",
+        max_turns=7,
+        cwd=repo,
+        claim_root=repo,
+        max_concurrency=2,
+        transcript_dir=str(tmp_path / "a" / "transcripts"),
     )
     rebuilt = mission_from_manifest(manifest, run_dir=tmp_path / "a")
 
@@ -121,9 +129,19 @@ def test_replay_through_a_manifest_rebuilt_mission_is_byte_identical(
     write_mission_manifest(
         replay_dir,
         manifest_from_request(
-            **{k: manifest[k] for k in
-               ("slug", "agents", "synthesis", "gate", "model", "max_turns",
-                "max_concurrency", "target_repo")},
+            **{
+                k: manifest[k]
+                for k in (
+                    "slug",
+                    "agents",
+                    "synthesis",
+                    "gate",
+                    "model",
+                    "max_turns",
+                    "max_concurrency",
+                    "target_repo",
+                )
+            },
             kind="replay",
             parent_run_id="demo",
         ),
@@ -146,7 +164,9 @@ def test_factory_runner_leaves_a_manifest_in_each_wave_dir(tmp_path: Path) -> No
         ],
     )
     runner = FactoryRunner(
-        spec, repo, factory_run_id="fr-1",
+        spec,
+        repo,
+        factory_run_id="fr-1",
         worker_factory=lambda run_dir, specs: scripted(),
     )
     state = runner.run()
@@ -159,11 +179,12 @@ def test_factory_runner_leaves_a_manifest_in_each_wave_dir(tmp_path: Path) -> No
         assert manifest["slug"] == f"fact-{wave.slug}"
         assert manifest["parent_run_id"] == "fr-1"
         assert manifest["target_repo"] == str(repo)
-        assert [a["name"] for a in manifest["agents"]] == [
-            a["name"] for a in wave.agents
-        ]
+        assert [a["name"] for a in manifest["agents"]] == [a["name"] for a in wave.agents]
     # The manifest is written before the run, next to the log it describes.
     assert (runner.run_dir(spec.waves[0]) / "run.jsonl").exists()
-    assert json.loads(
-        (runner.run_dir(spec.waves[0]) / MANIFEST_FILENAME).read_text(encoding="utf-8")
-    )["schema"] == 1
+    assert (
+        json.loads((runner.run_dir(spec.waves[0]) / MANIFEST_FILENAME).read_text(encoding="utf-8"))[
+            "schema"
+        ]
+        == 1
+    )

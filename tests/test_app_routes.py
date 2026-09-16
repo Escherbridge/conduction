@@ -12,9 +12,15 @@ import http.client
 import json
 import threading
 import time
+from pathlib import Path
 from urllib.parse import quote, urlencode
 
 import pytest
+
+# The app always scans its own repo, so the repo root is the one
+# target_repo guaranteed to exist and pass validate_target_repo on any
+# machine. A hardcoded absolute path fails everywhere but its author's.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def http_get(base_url: str, path: str, timeout: float = 5.0) -> tuple[int, dict, bytes]:
@@ -40,7 +46,9 @@ def http_get(base_url: str, path: str, timeout: float = 5.0) -> tuple[int, dict,
         conn.close()
 
 
-def http_post(base_url: str, path: str, json_body: dict | None = None, timeout: float = 5.0) -> tuple[int, bytes]:
+def http_post(
+    base_url: str, path: str, json_body: dict | None = None, timeout: float = 5.0
+) -> tuple[int, bytes]:
     """Make a POST request with JSON body and return (status_code, body_bytes)."""
     if base_url.startswith("http://"):
         base_url = base_url[7:]
@@ -120,8 +128,9 @@ def test_get_run_agents_percent_encoded(app_server_factory):
     agents_raw = data_raw["agents"]
 
     # Both should return the same number of agents
-    assert len(agents_encoded) == len(agents_raw), \
+    assert len(agents_encoded) == len(agents_raw), (
         "Encoded and raw requests returned different agent counts"
+    )
 
     # wave-a-vendor is known to have >0 agents
     if "wave-a-vendor" in run_id:
@@ -218,10 +227,7 @@ def test_stream_run_events_sse(app_server_factory):
                     current_data = line[5:].strip()
                 elif line == "" and current_event and current_data:
                     # Frame complete
-                    frames.append({
-                        "event": current_event,
-                        "data": json.loads(current_data)
-                    })
+                    frames.append({"event": current_event, "data": json.loads(current_data)})
 
                     # If we got run-complete, we're done
                     if current_event == "run-complete":
@@ -245,7 +251,9 @@ def test_stream_run_events_sse(app_server_factory):
 
     # First frame should be run-event with proper structure
     first_frame = frames[0]
-    assert first_frame["event"] == "run-event", f"First event should be run-event, got {first_frame['event']}"
+    assert first_frame["event"] == "run-event", (
+        f"First event should be run-event, got {first_frame['event']}"
+    )
 
     event_data = first_frame["data"]
     assert "seq" in event_data
@@ -255,15 +263,18 @@ def test_stream_run_events_sse(app_server_factory):
     assert "payload" in event_data
 
     # Payload should be an object, not a string
-    assert isinstance(event_data["payload"], dict), \
+    assert isinstance(event_data["payload"], dict), (
         f"payload should be a dict, got {type(event_data['payload'])}"
+    )
 
     # Last frame should be run-complete with status "stale"
     last_frame = frames[-1]
-    assert last_frame["event"] == "run-complete", \
+    assert last_frame["event"] == "run-complete", (
         f"Last event should be run-complete, got {last_frame['event']}"
-    assert last_frame["data"]["status"] == "stale", \
+    )
+    assert last_frame["data"]["status"] == "stale", (
         f"Historical run should have status 'stale', got {last_frame['data']['status']}"
+    )
 
 
 def test_stream_unknown_run_404(app_server_factory):
@@ -285,51 +296,68 @@ def test_post_runs_validation(app_server_factory):
     server = app_server_factory()
 
     # Missing target_repo → 400
-    status, body = http_post(server.base_url, "/api/runs", {
-        "slug": "test-mission",
-        "agents": [{"name": "agent1", "brief": "Do X"}]
-    })
+    status, body = http_post(
+        server.base_url,
+        "/api/runs",
+        {"slug": "test-mission", "agents": [{"name": "agent1", "brief": "Do X"}]},
+    )
     assert status == 400
     data = json.loads(body)
     assert "error" in data
 
     # Slug with ".." → 400
-    status, body = http_post(server.base_url, "/api/runs", {
-        "slug": "../escape",
-        "target_repo": "C:\\Users\\atooz\\Programming\\conduction",
-        "agents": [{"name": "agent1", "brief": "Do X"}]
-    })
+    status, body = http_post(
+        server.base_url,
+        "/api/runs",
+        {
+            "slug": "../escape",
+            "target_repo": str(REPO_ROOT),
+            "agents": [{"name": "agent1", "brief": "Do X"}],
+        },
+    )
     assert status == 400
     data = json.loads(body)
     assert "slug" in data["error"]
 
     # Slug with "/" → 400
-    status, body = http_post(server.base_url, "/api/runs", {
-        "slug": "bad/slug",
-        "target_repo": "C:\\Users\\atooz\\Programming\\conduction",
-        "agents": [{"name": "agent1", "brief": "Do X"}]
-    })
+    status, body = http_post(
+        server.base_url,
+        "/api/runs",
+        {
+            "slug": "bad/slug",
+            "target_repo": str(REPO_ROOT),
+            "agents": [{"name": "agent1", "brief": "Do X"}],
+        },
+    )
     assert status == 400
     data = json.loads(body)
     assert "error" in data
 
     # target_repo outside allowed roots → 400 mentioning allowed roots
-    status, body = http_post(server.base_url, "/api/runs", {
-        "slug": "test-mission",
-        "target_repo": "C:\\Windows",
-        "agents": [{"name": "agent1", "brief": "Do X"}]
-    })
+    status, body = http_post(
+        server.base_url,
+        "/api/runs",
+        {
+            "slug": "test-mission",
+            "target_repo": "C:\\Windows",
+            "agents": [{"name": "agent1", "brief": "Do X"}],
+        },
+    )
     assert status == 400
     data = json.loads(body)
     assert "error" in data
     assert "allowed" in data["error"].lower() or "root" in data["error"].lower()
 
     # Empty agents → 400
-    status, body = http_post(server.base_url, "/api/runs", {
-        "slug": "test-mission",
-        "target_repo": "C:\\Users\\atooz\\Programming\\conduction",
-        "agents": []
-    })
+    status, body = http_post(
+        server.base_url,
+        "/api/runs",
+        {
+            "slug": "test-mission",
+            "target_repo": str(REPO_ROOT),
+            "agents": [],
+        },
+    )
     assert status == 400
     data = json.loads(body)
     assert "error" in data

@@ -11,6 +11,7 @@
                 <div id="parent-run-link" style="display: none; margin-top: 0.5rem;"></div>
             </div>
             <div class="action-buttons">
+                <button id="rerun-btn" class="btn btn-ghost" title="Open the launch form prefilled from this run's manifest">Re-run</button>
                 <button id="replay-btn" class="btn btn-ghost" title="Replay this run for $0">Replay ($0)</button>
                 <button id="delete-btn" class="btn btn-danger" title="Delete this run">Delete</button>
             </div>
@@ -317,9 +318,13 @@
         }
 
         async function handleReplay() {
-            if (!confirm('Replay this run? This will create a $0 replay from the cached results.')) {
-                return;
-            }
+            const confirmed = await window.Conduction.confirmDialog({
+                title: 'Replay this run',
+                message: 'Replays every agent from the cached results — no model calls, no cost. ' +
+                    'Creates a new run you can compare against this one.',
+                confirmLabel: 'Replay ($0)'
+            });
+            if (!confirmed) return;
 
             const replayBtn = document.getElementById('replay-btn');
             replayBtn.disabled = true;
@@ -336,21 +341,26 @@
                     window.location.href = `/runs/${encodeURIComponent(data.run_id)}`;
                 } else {
                     const data = await response.json();
-                    alert(`Replay failed: ${data.error || response.statusText}`);
+                    window.Conduction.toast(`Replay failed: ${data.error || response.statusText}`, 'error');
                     replayBtn.disabled = false;
                     replayBtn.textContent = 'Replay ($0)';
                 }
             } catch (error) {
-                alert(`Error: ${error.message}`);
+                window.Conduction.toast(`Replay failed: ${error.message}`, 'error');
                 replayBtn.disabled = false;
                 replayBtn.textContent = 'Replay ($0)';
             }
         }
 
         async function handleDelete() {
-            if (!confirm('Delete this run? This will permanently remove the run directory and all data.')) {
-                return;
-            }
+            const confirmed = await window.Conduction.confirmDialog({
+                title: 'Delete this run',
+                message: 'Permanently removes the run directory, its event log, manifest and transcripts ' +
+                    'from the target repo. This cannot be undone.',
+                confirmLabel: 'Delete run',
+                danger: true
+            });
+            if (!confirmed) return;
 
             const deleteBtn = document.getElementById('delete-btn');
             deleteBtn.disabled = true;
@@ -365,12 +375,12 @@
                     window.location.href = '/runs';
                 } else {
                     const data = await response.json();
-                    alert(`Delete failed: ${data.error || response.statusText}`);
+                    window.Conduction.toast(`Delete failed: ${data.error || response.statusText}`, 'error');
                     deleteBtn.disabled = false;
                     deleteBtn.textContent = 'Delete';
                 }
             } catch (error) {
-                alert(`Error: ${error.message}`);
+                window.Conduction.toast(`Delete failed: ${error.message}`, 'error');
                 deleteBtn.disabled = false;
                 deleteBtn.textContent = 'Delete';
             }
@@ -942,7 +952,19 @@
             });
         }
 
+        /* Re-run: hand the run's manifest to the launch form instead of making
+           the user retype every agent brief. The server picks a free slug
+           (`name-2`, `name-3`, ...) because POST /api/runs rejects a slug whose
+           run already exists. */
+        /* Navigate straight to the launch form; prefillFromRun() there owns both
+           the fetch and its error display. A pre-flight fetch here would walk
+           the slug series twice for one click and still race it. */
+        function handleRerun() {
+            window.location.href = `/launch?from=${encodeId(RUN_ID)}`;
+        }
+
         function setupActionButtons() {
+            document.getElementById('rerun-btn').addEventListener('click', handleRerun);
             document.getElementById('replay-btn').addEventListener('click', handleReplay);
             document.getElementById('delete-btn').addEventListener('click', handleDelete);
         }

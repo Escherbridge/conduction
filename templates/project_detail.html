@@ -70,7 +70,7 @@
 {% block scripts %}
 <script>
 const REPO_KEY = {{ repo_key | tojson }};
-const { escapeHtml, fetchJson, pill, fmtAgo } = window.Conduction;
+const { escapeHtml, fetchJson, pill, fmtAgo, toast } = window.Conduction;
 
 let projectData = null;
 let effectiveRulesCache = null;
@@ -144,7 +144,13 @@ async function updateRule(idx) {
 }
 
 async function deleteRule(idx) {
-    if (!confirm('Delete this rule?')) return;
+    const confirmed = await window.Conduction.confirmDialog({
+        title: 'Delete rule',
+        message: 'This rule stops applying to every future run in this project. Runs already recorded keep the rule they ran under.',
+        confirmLabel: 'Delete rule',
+        danger: true
+    });
+    if (!confirmed) return;
     projectData.rules.splice(idx, 1);
     await saveProject();
 }
@@ -188,47 +194,58 @@ function renderGoals() {
     });
 }
 
-function editGoal(goalId) {
+const GOAL_STATUSES = [
+    { value: 'open', label: 'Open' },
+    { value: 'done', label: 'Done' },
+    { value: 'blocked', label: 'Blocked' }
+];
+
+/* One form with every field visible, instead of three chained window.prompt()
+   calls you could not review or back out of. Resolves null when cancelled. */
+function goalDialog(goal) {
+    return window.Conduction.formDialog({
+        title: goal ? 'Edit goal' : 'New goal',
+        submitLabel: goal ? 'Save goal' : 'Add goal',
+        fields: [
+            { name: 'title', label: 'Title', required: true, value: goal ? goal.title : '' },
+            { name: 'description', label: 'Description', type: 'textarea', rows: 3,
+              value: goal ? (goal.description || '') : '' },
+            { name: 'status', label: 'Status', type: 'select', options: GOAL_STATUSES,
+              value: goal ? goal.status : 'open' }
+        ]
+    });
+}
+async function editGoal(goalId) {
     const goal = projectData.goals.find(g => g.id === goalId);
     if (!goal) return;
 
-    const newTitle = prompt('Goal title:', goal.title);
-    if (newTitle === null) return;
+    const values = await goalDialog(goal);
+    if (!values) return;
 
-    const newDesc = prompt('Description:', goal.description || '');
-    if (newDesc === null) return;
-
-    const newStatus = prompt('Status (open/done/blocked):', goal.status);
-    if (!['open', 'done', 'blocked'].includes(newStatus)) {
-        alert('Invalid status');
-        return;
-    }
-
-    goal.title = newTitle;
-    goal.description = newDesc;
-    goal.status = newStatus;
-    goal.updated_at = new Date().toISOString();
-
-    saveProject();
+    Object.assign(goal, {
+        title: values.title,
+        description: values.description,
+        status: values.status,
+        updated_at: new Date().toISOString()
+    });
+    await saveProject('Goal updated');
 }
 
 async function addGoal() {
-    const title = prompt('Goal title:');
-    if (!title) return;
-
-    const description = prompt('Description (optional):');
+    const values = await goalDialog(null);
+    if (!values) return;
 
     projectData.goals = projectData.goals || [];
     projectData.goals.push({
         id: generateId(),
-        title: title,
-        description: description || '',
-        status: 'open',
+        title: values.title,
+        description: values.description,
+        status: values.status,
         linked_runs: [],
         updated_at: new Date().toISOString()
     });
 
-    await saveProject();
+    await saveProject('Goal added');
 }
 
 async function renderSchedules() {
@@ -270,21 +287,26 @@ async function renderSchedules() {
 }
 
 async function runScheduleNow(schedId) {
-    if (!confirm('Run this schedule now?')) return;
+    const confirmed = await window.Conduction.confirmDialog({
+        title: 'Run schedule now',
+        message: 'This launches a real factory run immediately, outside its normal cadence.',
+        confirmLabel: 'Run now'
+    });
+    if (!confirmed) return;
 
     try {
         const result = await fetchJson(`/api/schedules/${encodeURIComponent(schedId)}/run-now`, {
             method: 'POST'
         });
-        alert(`Launched factory run: ${result.factory_run_id}`);
+        toast(`Launched factory run ${result.factory_run_id}`, 'ok');
         renderSchedules();
     } catch (error) {
-        alert(`Error: ${error.message}`);
+        toast(`Could not run the schedule: ${error.message}`, 'error');
     }
 }
 
 async function addSchedule() {
-    alert('Schedule creation UI coming soon - edit project.json directly for now');
+    toast('No schedule editor yet — add it to .agentgraph/project.json in the repo, then reload.', 'warn');
 }
 
 async function loadRuns() {
@@ -322,7 +344,7 @@ async function loadRuns() {
     }
 }
 
-async function saveProject() {
+async function saveProject(successMessage) {
     try {
         await fetchJson(`/api/projects/${encodeURIComponent(REPO_KEY)}`, {
             method: 'PUT',
@@ -330,8 +352,10 @@ async function saveProject() {
             body: JSON.stringify(projectData)
         });
         await loadProject();
+        if (successMessage) toast(successMessage, 'ok');
     } catch (error) {
-        alert(`Error saving: ${error.message}`);
+        // Sticky: a failed save the user scrolled past is a lost edit.
+        toast(`Could not save: ${error.message}`, 'error');
     }
 }
 

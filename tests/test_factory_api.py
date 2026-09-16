@@ -121,9 +121,7 @@ def test_factory_run_completes_and_each_wave_has_a_resolvable_run(server, target
 
     for wave in state["waves"]:
         run_id = resolve_app_run_id(server.base_url, wave)
-        agents = requests.get(
-            f"{server.base_url}/api/runs/{run_id}/agents", timeout=30
-        )
+        agents = requests.get(f"{server.base_url}/api/runs/{run_id}/agents", timeout=30)
         assert agents.status_code == 200, agents.text
         assert agents.json()["agents"], f"no agents mirrored for {run_id}"
 

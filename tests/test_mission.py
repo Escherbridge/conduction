@@ -70,9 +70,7 @@ def test_mission_interrupt_resume_and_replay(tmp_path: Path) -> None:
     """The three run modes, one mission object, no bespoke plumbing."""
     mission = build_mission()
 
-    first = mission.run(
-        tmp_path / "a.jsonl", worker=scripted(), interrupt_after=1
-    )
+    first = mission.run(tmp_path / "a.jsonl", worker=scripted(), interrupt_after=1)
     assert first.host.stopped_reason == "until"
 
     resumed = mission.resume(tmp_path / "a.jsonl", tmp_path / "b.jsonl", worker=scripted())
@@ -101,21 +99,30 @@ def test_narrate_tells_the_story(tmp_path: Path) -> None:
 def test_narrate_renders_cut_off_agents_with_their_partial_output() -> None:
     """A cut-off agent's surviving text must be in the story, not just the log."""
     events = [
-        Event(id="evt_001", type="agent.requested", payload={
-            "worker": "doomed",
-            "args_hash": "x",
-            "identity": {"prompt": "do a thing", "model": "m"},
-        }),
-        Event(id="evt_002", type="agent.responded", caused_by="evt_001", payload={
-            "worker": "doomed",
-            "output": None,
-            "error": {
-                "type": "AgentError",
-                "message": "Reached maximum number of turns",
-                "partial_output": "I had confirmed the first two defects when",
+        Event(
+            id="evt_001",
+            type="agent.requested",
+            payload={
+                "worker": "doomed",
+                "args_hash": "x",
+                "identity": {"prompt": "do a thing", "model": "m"},
             },
-            "cost_usd": "0.10",
-        }),
+        ),
+        Event(
+            id="evt_002",
+            type="agent.responded",
+            caused_by="evt_001",
+            payload={
+                "worker": "doomed",
+                "output": None,
+                "error": {
+                    "type": "AgentError",
+                    "message": "Reached maximum number of turns",
+                    "partial_output": "I had confirmed the first two defects when",
+                },
+                "cost_usd": "0.10",
+            },
+        ),
     ]
     story = narrate(events)
     assert "never returned" not in story
@@ -150,9 +157,7 @@ def test_transcript_writer_is_lazy_and_readable(tmp_path: Path) -> None:
     writer.tool_use("Read", {"file_path": "north.md"})
     writer.tool_result("north side is clear" * 100)
     writer.text("North is clear.")
-    writer.result(
-        AgentResponse(output="done", cost_usd=Decimal("0.05"), num_turns=3)
-    )
+    writer.result(AgentResponse(output="done", cost_usd=Decimal("0.05"), num_turns=3))
 
     content = (tmp_path / "worker.md").read_text(encoding="utf-8")
     assert content.startswith("# worker")

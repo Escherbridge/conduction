@@ -152,13 +152,9 @@ def test_load_factory_spec_round_trips(tmp_path: Path) -> None:
 
 def read_state(target_repo: Path, factory_run_id: str) -> dict:
     return json.loads(
-        (
-            target_repo
-            / ".agentgraph"
-            / "factory-runs"
-            / factory_run_id
-            / "state.json"
-        ).read_text(encoding="utf-8")
+        (target_repo / ".agentgraph" / "factory-runs" / factory_run_id / "state.json").read_text(
+            encoding="utf-8"
+        )
     )
 
 

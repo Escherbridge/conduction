@@ -68,12 +68,15 @@ A **mission manifest** (`mission.json`) is written by app.py and factory.py into
 
 ## Running and Testing
 
-**Environment**: Conduction's venv (venv/) has sanic, datastar_py, sqlalchemy, aiosqlite. The AgentGraph module (agentgraph/) is imported in-process.
+**Environment**: any Python 3.12 with `requirements.txt` + `requirements-dev.txt` installed. The AgentGraph module (`agentgraph/`) is a
+vendored copy imported in-process; `tests/conftest.py` puts the repo root on
+`sys.path` so it always resolves to the copy here rather than another checkout.
 
-**Test harness** (from shared findings): run the suite via the Projects/.venv (which has pytest and the SDK):
+**Test harness**:
 ```
-cd C:\Users\atooz\Programming\conduction && \
-  C:\Users\atooz\Programming\Projects\agentgraph\.venv\Scripts\python.exe -m pytest tests -q
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest tests -q          # ~257 tests, ~2m40s
+ruff check . && ruff format --check .
 ```
 
 The orchestrator's gate, after all agents finish, runs this suite plus HTTP probes on `/api/runs`, `/runs`, `/query`, `/api/query/costs`, `/api/query/claims/conflicts` on a dedicated port.
@@ -133,7 +136,7 @@ The orchestrator's gate, after all agents finish, runs this suite plus HTTP prob
 
 **install.ps1 / install.sh** (repo root): Create ./venv if missing (prefer `uv venv` + `uv pip install`, fall back to `python -m venv + pip`). Install requirements.txt + requirements-dev.txt. Verify `import app`. Print next steps. Idempotent.
 
-**conduction.ps1 / conduction.cmd / conduction.sh**: If http://127.0.0.1:$PORT/api/ping already answers → open browser. Else start `venv\Scripts\python app.py` (CONDUCTION_PORT honoured, default 8000) detached with logs in `.agentgraph/app.log`. Wait for /api/ping (30 s timeout), open browser. `-NoBrowser` flag. Never kills by name.
+**conduction.ps1 / conduction.cmd / conduction.sh**: If http://$HOST:$PORT/api/ping already answers → open browser. Else start `venv\Scripts\python app.py` detached with logs in `.agentgraph/app.log` (previous run rotated to `app.log.prev`; PowerShell also writes `app.log.err`). Wait for /api/ping, polling every 500 ms, and bail early if the child exits. Defaults, each settable by flag or env var: port 8000 (`--port`/`-Port`, CONDUCTION_PORT), host 127.0.0.1 (`--host`/`-BindHost`, CONDUCTION_HOST), timeout 30 s (`--timeout`/`-TimeoutSeconds`, CONDUCTION_START_TIMEOUT), browser on (`--no-browser`/`-NoBrowser`, CONDUCTION_NO_BROWSER=1). `--stop`/`-Stop` kills the recorded PID; a stale PID file is cleared on start so `--stop` never targets a recycled PID. Never kills by name. Note: Start-Process has no -Environment parameter on PS 5.1 — the launcher exports CONDUCTION_PORT/HOST into its own environment so the child inherits them.
 
 **scripts/create-shortcut.ps1**: Creates "Conduction.lnk" on Desktop and Start Menu Programs, targeting `powershell.exe -NoProfile -ExecutionPolicy Bypass -File conduction.ps1`, working dir = repo root, icon from shell32.dll. `-Remove` to delete. install.ps1 offers to run it (`-Shortcut` switch runs non-interactively).
 

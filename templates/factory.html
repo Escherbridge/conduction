@@ -12,7 +12,8 @@
                         <div class="form-group">
                             <label for="target_repo">Target Repository</label>
                             <input type="text" id="target_repo" name="target_repo" required
-                                   placeholder="/path/to/repo" class="form-input">
+                                   placeholder="/path/to/repo" class="form-input mono"
+                                   data-folder-input data-folder-title="Select target repository">
                         </div>
 
                         <div class="form-group">
@@ -145,7 +146,7 @@
 
 {% block scripts %}
 <script>
-    const { escapeHtml, fetchJson, pill, encodeId } = window.Conduction;
+    const { escapeHtml, fetchJson, pill, encodeId, toast } = window.Conduction;
     let factoryRuns = [];
     let selectedRunId = null;
     let pollInterval = null;
@@ -452,10 +453,10 @@
                     headers: { 'Content-Type': 'application/json' }
                 });
 
-                alert('Interrupt signal sent');
+                toast('Interrupt signal sent', 'ok');
                 await loadRunDetail(selectedRunId);
             } catch (error) {
-                alert(`Error: ${error.message}`);
+                toast(`Interrupt failed: ${error.message}`, 'error');
                 btn.disabled = false;
             }
         }
@@ -472,12 +473,12 @@
                     headers: { 'Content-Type': 'application/json' }
                 });
 
-                alert(`Resumed: ${data.factory_run_id}`);
+                toast(`Resumed ${data.factory_run_id}`, 'ok');
                 await loadFactoryRuns();
                 await loadRunDetail(selectedRunId);
                 btn.disabled = false;
             } catch (error) {
-                alert(`Error: ${error.message}`);
+                toast(`Resume failed: ${error.message}`, 'error');
                 btn.disabled = false;
             }
         }

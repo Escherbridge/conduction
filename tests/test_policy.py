@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 
 from agentgraph import policy
-from agentgraph.factory import FactorySpec, FactoryRunner, FactoryWave
+from agentgraph.factory import FactoryRunner, FactorySpec, FactoryWave
 from agentgraph.log import read_events
 from agentgraph.manifest import AGENTGRAPH_GITIGNORE, read_mission_manifest
 from agentgraph.mission import EDIT_TOOLS, READ_TOOLS, AgentSpec
@@ -63,14 +61,32 @@ def test_valid_docs_have_no_errors():
     "mutate, fragment",
     [
         (lambda d: d.update(schema=2), "schema must be 1"),
-        (lambda d: d["rules"].append({"id": "", "text": "x", "scope": "all", "enabled": True}), "rules[0].id"),
+        (
+            lambda d: d["rules"].append({"id": "", "text": "x", "scope": "all", "enabled": True}),
+            "rules[0].id",
+        ),
         (lambda d: d["rules"].append(rule("r", "t", scope="nobody")), "scope must be"),
-        (lambda d: d["rules"].append({"id": "r", "text": "t", "scope": "all", "enabled": "yes"}), "enabled must be a boolean"),
+        (
+            lambda d: d["rules"].append({"id": "r", "text": "t", "scope": "all", "enabled": "yes"}),
+            "enabled must be a boolean",
+        ),
         (lambda d: d["goals"].append({"id": "g", "title": "t", "status": "wat"}), "status must be"),
-        (lambda d: d["schedules"].append(schedule(every=None, cron=None, target_repo="r")), "one of every or cron"),
-        (lambda d: d["schedules"].append(schedule(every="17x", target_repo="r")), "every must look like"),
-        (lambda d: d["schedules"].append(schedule(every=None, cron="0 2 * *", target_repo="r")), "cron must be 5 fields"),
-        (lambda d: d["schedules"].append(schedule(kind="nonsense", target_repo="r")), "kind must be"),
+        (
+            lambda d: d["schedules"].append(schedule(every=None, cron=None, target_repo="r")),
+            "one of every or cron",
+        ),
+        (
+            lambda d: d["schedules"].append(schedule(every="17x", target_repo="r")),
+            "every must look like",
+        ),
+        (
+            lambda d: d["schedules"].append(schedule(every=None, cron="0 2 * *", target_repo="r")),
+            "cron must be 5 fields",
+        ),
+        (
+            lambda d: d["schedules"].append(schedule(kind="nonsense", target_repo="r")),
+            "kind must be",
+        ),
         (lambda d: d["schedules"].append(schedule()), "target_repo is required"),
     ],
 )
@@ -109,8 +125,14 @@ def test_save_load_round_trip_is_atomic(tmp_path):
 
     project = policy.empty_project("demo")
     project["goals"] = [
-        {"id": "g", "title": "t", "description": "", "status": "done",
-         "linked_runs": ["run-1"], "updated_at": "2026-08-21T00:00:00Z"}
+        {
+            "id": "g",
+            "title": "t",
+            "description": "",
+            "status": "done",
+            "linked_runs": ["run-1"],
+            "updated_at": "2026-08-21T00:00:00Z",
+        }
     ]
     policy.save_project(tmp_path, project)
     assert policy.load_project(tmp_path) == project
@@ -140,8 +162,11 @@ def test_effective_rules_orders_ecosystem_first_and_drops_disabled():
 
 
 def test_rules_block_filters_by_scope():
-    rules = [rule("a", "everyone"), rule("w", "writers only", scope="writers"),
-             rule("r", "readers only", scope="readers")]
+    rules = [
+        rule("a", "everyone"),
+        rule("w", "writers only", scope="writers"),
+        rule("r", "readers only", scope="readers"),
+    ]
     writer_block = policy.rules_block(rules, writer=True)
     reader_block = policy.rules_block(rules, writer=False)
     assert writer_block.startswith(policy.RULES_MARKER)
@@ -227,9 +252,7 @@ def test_next_due_cron(cron, now, expected):
 def test_next_due_cron_never_repeats_the_last_run():
     sched = schedule(every=None, cron="0 2 * * *")
     last = datetime(2026, 8, 21, 2, 0)
-    assert policy.next_due(sched, datetime(2026, 8, 21, 2, 0), last) == datetime(
-        2026, 8, 22, 2, 0
-    )
+    assert policy.next_due(sched, datetime(2026, 8, 21, 2, 0), last) == datetime(2026, 8, 22, 2, 0)
 
 
 def test_next_due_returns_none_without_a_valid_trigger():
@@ -243,19 +266,23 @@ def test_next_due_returns_none_without_a_valid_trigger():
 def test_due_schedules_picks_only_enabled_and_due():
     ecosystem = {
         "schedules": [
-            schedule("eco-due", every="30m", last_run_at="2026-08-21T10:00:00",
-                     target_repo="C:/eco"),
-            schedule("eco-not-yet", every="6h", last_run_at="2026-08-21T11:00:00",
-                     target_repo="C:/eco"),
-            schedule("eco-disabled", every="30m", enabled=False, last_run_at=None,
-                     target_repo="C:/eco"),
+            schedule(
+                "eco-due", every="30m", last_run_at="2026-08-21T10:00:00", target_repo="C:/eco"
+            ),
+            schedule(
+                "eco-not-yet", every="6h", last_run_at="2026-08-21T11:00:00", target_repo="C:/eco"
+            ),
+            schedule(
+                "eco-disabled", every="30m", enabled=False, last_run_at=None, target_repo="C:/eco"
+            ),
         ]
     }
     projects = {
         "C:/proj": {
             "schedules": [
-                schedule("proj-due", every=None, cron="0 2 * * *",
-                         last_run_at="2026-08-20T02:00:00"),
+                schedule(
+                    "proj-due", every=None, cron="0 2 * * *", last_run_at="2026-08-20T02:00:00"
+                ),
                 schedule("proj-disabled", every="30m", enabled=False),
             ]
         },
@@ -335,8 +362,7 @@ def test_factory_runner_prepends_rules_to_every_brief(tmp_path):
     rules_findings = [
         event.payload
         for event in read_events(run_dir / "run.jsonl")
-        if event.type == "finding.recorded"
-        and event.payload.get("topic") == "rules"
+        if event.type == "finding.recorded" and event.payload.get("topic") == "rules"
     ]
     assert rules_findings and "cite path:line" in rules_findings[0]["detail"]
 

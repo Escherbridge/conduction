@@ -68,7 +68,7 @@ def temp_repo():
     prune_known_repos()
     root = Path.home() / ".conduction-test-repos"
     root.mkdir(parents=True, exist_ok=True)
-    repo = root / ("cfg-%d" % int(time.time() * 1000))
+    repo = root / f"cfg-{int(time.time() * 1000)}"
     (repo / ".agentgraph").mkdir(parents=True)
     try:
         yield repo.resolve()
@@ -103,7 +103,12 @@ def test_put_ecosystem_round_trips_a_rule(server):
 def test_invalid_rule_is_rejected_with_400(server):
     bad = requests.put(
         f"{server.base_url}/api/ecosystem",
-        json={"schema": 1, "rules": [{"id": "x", "scope": "nonsense"}], "goals": [], "schedules": []},
+        json={
+            "schema": 1,
+            "rules": [{"id": "x", "scope": "nonsense"}],
+            "goals": [],
+            "schedules": [],
+        },
         timeout=30,
     )
     assert bad.status_code == 400, bad.text
@@ -201,7 +206,13 @@ def test_effective_rules_merges_ecosystem_and_project(server, temp_repo):
     ).raise_for_status()
     requests.put(
         f"{server.base_url}/api/projects/{key}",
-        json={"schema": 1, "name": "Temp Repo", "rules": [PROJECT_RULE], "goals": [], "schedules": []},
+        json={
+            "schema": 1,
+            "name": "Temp Repo",
+            "rules": [PROJECT_RULE],
+            "goals": [],
+            "schedules": [],
+        },
         timeout=30,
     ).raise_for_status()
 
@@ -241,7 +252,13 @@ def test_launched_mission_carries_binding_rules(server, temp_repo):
     ).raise_for_status()
     requests.put(
         f"{server.base_url}/api/projects/{key}",
-        json={"schema": 1, "name": "Temp Repo", "rules": [PROJECT_RULE], "goals": [], "schedules": []},
+        json={
+            "schema": 1,
+            "name": "Temp Repo",
+            "rules": [PROJECT_RULE],
+            "goals": [],
+            "schedules": [],
+        },
         timeout=30,
     ).raise_for_status()
 
@@ -270,9 +287,7 @@ def test_launched_mission_carries_binding_rules(server, temp_repo):
     assert ECO_RULE["text"] in brief
     assert PROJECT_RULE["text"] in brief
 
-    findings = requests.get(
-        f"{server.base_url}/api/runs/{run_id}/findings", timeout=30
-    ).json()
+    findings = requests.get(f"{server.base_url}/api/runs/{run_id}/findings", timeout=30).json()
     assert any(finding["topic"] == "rules" for finding in findings), findings
 
 
@@ -318,18 +333,14 @@ def test_run_now_launches_the_schedules_factory(server, temp_repo):
         timeout=30,
     ).raise_for_status()
 
-    started = requests.post(
-        f"{server.base_url}/api/schedules/s-now/run-now", timeout=60
-    )
+    started = requests.post(f"{server.base_url}/api/schedules/s-now/run-now", timeout=60)
     assert started.status_code == 200, started.text
     factory_run_id = started.json()["factory_run_id"]
 
     deadline = time.monotonic() + 180
     state = {}
     while time.monotonic() < deadline:
-        response = requests.get(
-            f"{server.base_url}/api/factory/runs/{factory_run_id}", timeout=30
-        )
+        response = requests.get(f"{server.base_url}/api/factory/runs/{factory_run_id}", timeout=30)
         if response.status_code == 200:
             state = response.json()
             if state.get("status") in ("completed", "failed", "halted", "errored"):
